@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.1
+// @version      0.5.3
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -162,10 +162,13 @@
   }
 
   function pendingCard(item) {
+    const origin = pendencyOrigin(item);
+    const observationMeta = [item.ultimaObservacaoEm ? formatDateTime(item.ultimaObservacaoEm) : "", item.ultimaObservacaoUsuario].filter(Boolean).join(" · ");
     return `<article class="agora-pending-card ${isOverdue(item) ? "overdue" : ""}" data-pending-id="${escapeHTML(item.id)}">
-      <header><span>${escapeHTML(item.categoria)}</span><b>${escapeHTML(item.status)}</b>${item.reincidente === true || item.reincidente === "true" ? "<em>Reincidente</em>" : ""}</header>
+      <header><span>${escapeHTML(item.categoria)}</span><i class="agora-origin ${origin === "Internação" ? "hospital" : "consultation"}">${escapeHTML(origin)}</i>${item.codigo ? `<code>#${escapeHTML(item.codigo)}</code>` : ""}<b>${escapeHTML(item.status)}</b>${item.reincidente === true || item.reincidente === "true" ? "<em>Reincidente</em>" : ""}</header>
       <p>${escapeHTML(item.descricao)}</p>
       <small>${item.prazo ? `Prazo: ${escapeHTML(formatDate(item.prazo))}` : "Sem prazo"}${item.responsavel ? ` · Responsável: ${escapeHTML(item.responsavel)}` : ""}</small>
+      ${item.ultimaObservacao ? `<div class="agora-latest-observation"><b>Última observação</b><p>${escapeHTML(item.ultimaObservacao)}</p>${observationMeta ? `<small>${escapeHTML(observationMeta)}</small>` : ""}</div>` : ""}
       <div class="agora-grid"><label>Status<select data-status>${STATUSES.map(status => `<option ${status === item.status ? "selected" : ""}>${escapeHTML(status)}</option>`).join("")}</select></label><label>Observação<input data-observation maxlength="1000"></label></div>
       <div class="agora-actions"><button type="button" data-history-pending="${escapeHTML(item.id)}">Histórico</button><button type="button" class="agora-primary" data-update-pending="${escapeHTML(item.id)}">Salvar alteração</button></div>
       <div class="agora-history" hidden></div>
@@ -292,7 +295,7 @@
       <header><div><h1>Painel da coordenação</h1><p>Pendências de consultas e internações em um único acompanhamento.</p></div><button type="button" data-dashboard-close>Fechar</button></header>
       <div class="agora-dashboard-filters">
         <label>Buscar<input data-dashboard-search placeholder="Paciente, tutor, veterinário ou descrição"></label>
-        <label>Status<select data-dashboard-status><option value="">Todos</option>${STATUSES.map(item => `<option>${escapeHTML(item)}</option>`).join("")}</select></label>
+        <label>Status<select data-dashboard-status><option value="active">Todos ativos</option>${STATUSES.map(item => `<option>${escapeHTML(item)}</option>`).join("")}<option value="all">Todos (inclui Encerradas)</option></select></label>
         <label>Categoria<select data-dashboard-category><option value="">Todas</option>${CATEGORIES.map(item => `<option>${escapeHTML(item)}</option>`).join("")}</select></label>
         <label>Origem<select data-dashboard-origin><option value="">Todas</option><option>Consulta</option><option>Internação</option></select></label>
         <label>Veterinário<select data-dashboard-veterinarian><option value="">Todos</option></select></label>
@@ -347,11 +350,11 @@
     const veterinarian = root.querySelector("[data-dashboard-veterinarian]").value;
     const highlight = root.querySelector("[data-dashboard-highlight]").value;
     return dashboardPendencies.filter(item => {
-      const searchable = normalizeText([item.paciente, item.tutor, item.veterinario, item.descricao, item.responsavel].join(" "));
+      const searchable = normalizeText([item.codigo, item.id, item.ciplexAnimalId, item.paciente, item.tutor, item.veterinario, item.descricao, item.responsavel, item.ultimaObservacao].join(" "));
       return (!search || searchable.includes(search))
-        && (!status || item.status === status)
+        && (status === "all" || status === "active" && item.status !== "Encerrada" || item.status === status)
         && (!category || item.categoria === category)
-        && (!origin || item.origem === origin)
+        && (!origin || pendencyOrigin(item) === origin)
         && (!veterinarian || item.veterinario === veterinarian)
         && (!highlight || highlight === "overdue" && isOverdue(item) || highlight === "recurrent" && (item.reincidente === true || item.reincidente === "true"));
     }).sort((first, second) => Number(isOverdue(second)) - Number(isOverdue(first)) || String(first.prazo || "9999").localeCompare(String(second.prazo || "9999")));
@@ -395,25 +398,116 @@
     if (!items.length) return notify("Não há pendências nos filtros atuais.", true);
     const text = dashboardReportText(items);
     const overlay = createOverlay("Relatório por veterinário", true);
-    overlay.querySelector(".agora-modal-body").innerHTML = `<textarea class="agora-report-text" rows="22" readonly>${escapeHTML(text)}</textarea><div class="agora-actions"><button type="button" data-close>Fechar</button><button type="button" class="agora-primary" data-report-copy>Copiar relatório</button></div>`;
+    overlay.querySelector(".agora-modal-body").innerHTML = `<div class="agora-report-options"><button type="button" class="active" data-report-summary>Resumo atual</button><button type="button" data-report-history>Com histórico</button></div><textarea class="agora-report-text" rows="22" readonly>${escapeHTML(text)}</textarea><div class="agora-actions"><button type="button" data-close>Fechar</button><button type="button" class="agora-primary" data-report-copy>Copiar relatório</button></div>`;
     document.body.append(overlay);
-    overlay.querySelector("[data-report-copy]").addEventListener("click", () => copyText(text));
+    const textarea = overlay.querySelector(".agora-report-text");
+    const summaryButton = overlay.querySelector("[data-report-summary]");
+    const historyButton = overlay.querySelector("[data-report-history]");
+    let historyText = "";
+    let reportMode = "summary";
+    summaryButton.addEventListener("click", () => {
+      reportMode = "summary";
+      textarea.value = text;
+      summaryButton.classList.add("active");
+      historyButton.classList.remove("active");
+    });
+    historyButton.addEventListener("click", async () => {
+      reportMode = "history";
+      summaryButton.classList.remove("active");
+      historyButton.classList.add("active");
+      if (historyText) {
+        textarea.value = historyText;
+        return;
+      }
+      historyButton.disabled = true;
+      textarea.value = "Carregando histórico...";
+      try {
+        const result = await apiRequest("listHistorico");
+        historyText = dashboardHistoryReportText(items, result.historico);
+        if (reportMode === "history") textarea.value = historyText;
+      } catch (error) {
+        if (reportMode === "history") {
+          reportMode = "summary";
+          textarea.value = text;
+          summaryButton.classList.add("active");
+          historyButton.classList.remove("active");
+        }
+        notify(error.message, true);
+      } finally {
+        historyButton.disabled = false;
+      }
+    });
+    overlay.querySelector("[data-report-copy]").addEventListener("click", () => copyText(textarea.value));
   }
 
   function dashboardReportText(items) {
-    const groups = new Map();
-    items.forEach(item => {
-      const name = item.veterinario || "Não informado";
-      if (!groups.has(name)) groups.set(name, []);
-      groups.get(name).push(item);
+    return groupedDashboardReport(items, `PENDÊNCIAS DA COORDENAÇÃO - ${formatDate(todayISO())}`, item => {
+      const code = item.codigo ? `[${item.codigo}] ` : "";
+      return `  - ${code}${item.descricao} [${item.status}]${item.prazo ? ` - prazo ${formatDate(item.prazo)}` : ""}${isOverdue(item) ? " - VENCIDA" : ""}`;
     });
-    const title = `PENDÊNCIAS DA COORDENAÇÃO - ${formatDate(todayISO())}`;
-    const sections = [...groups.entries()].sort(([first], [second]) => first.localeCompare(second, "pt-BR")).map(([name, records]) => {
-      const heading = `${name} (${records.length})`;
-      const lines = records.map(item => `- ${item.paciente || "Paciente não informado"}: ${item.descricao} [${item.status}]${item.prazo ? ` - prazo ${formatDate(item.prazo)}` : ""}${isOverdue(item) ? " - VENCIDA" : ""}`);
-      return [heading, ...lines].join("\n");
+  }
+
+  function dashboardHistoryReportText(items, history) {
+    const byPending = new Map();
+    history.forEach(event => {
+      if (!byPending.has(event.pendenciaId)) byPending.set(event.pendenciaId, []);
+      byPending.get(event.pendenciaId).push(event);
+    });
+    return groupedDashboardReport(items, `AUDITORIA DE PENDÊNCIAS - ${formatDate(todayISO())}`, item => {
+      const lines = [`  - Pendência ${item.codigo || "sem código"}`, `    ${item.descricao} [${item.status}]`];
+      const events = (byPending.get(item.id) || []).sort((first, second) => String(first.data).localeCompare(String(second.data)));
+      if (!events.length) lines.push("    Histórico: sem eventos registrados");
+      else {
+        lines.push("    Histórico:");
+        events.forEach(event => {
+          const transition = event.statusAnterior || event.statusNovo ? ` | ${event.statusAnterior || "-"} → ${event.statusNovo || "-"}` : "";
+          lines.push(`    - ${formatDateTime(event.data)} | ${event.usuario || "Não informado"} | ${event.acao || "Evento"}${transition}${event.observacao ? ` | ${event.observacao}` : ""}`);
+        });
+      }
+      return lines.join("\n");
+    });
+  }
+
+  function groupedDashboardReport(items, title, renderPending) {
+    const veterinarians = groupBy(items, item => item.veterinario || "Não informado");
+    const sections = [...veterinarians.entries()].sort(([first], [second]) => first.localeCompare(second, "pt-BR")).map(([veterinarian, records]) => {
+      const patients = groupBy(records, item => item.ciplexAnimalId || item.pacienteId || `${normalizeText(item.paciente)}|${normalizeText(item.tutor)}`);
+      const patientSections = [...patients.values()].sort((first, second) => String(first[0].paciente || "").localeCompare(String(second[0].paciente || ""), "pt-BR")).map(patientRecords => {
+        const patient = patientRecords[0];
+        const identifier = patient.ciplexAnimalId || "sem ID Ciplex";
+        const lines = [`- ${patient.paciente || "Paciente não informado"} - ${identifier} - ${patient.tutor || "Tutor não informado"}:`];
+        const origins = groupBy(patientRecords, pendencyOrigin);
+        ["Internação", "Consulta"].forEach(origin => {
+          const pending = origins.get(origin);
+          if (!pending?.length) return;
+          lines.push(` ${origin}:`);
+          pending.forEach(item => lines.push(renderPending(item)));
+        });
+        [...origins.entries()].filter(([origin]) => !["Internação", "Consulta"].includes(origin)).forEach(([origin, pending]) => {
+          lines.push(` ${origin}:`);
+          pending.forEach(item => lines.push(renderPending(item)));
+        });
+        return lines.join("\n");
+      });
+      return [`VETERINÁRIO: ${veterinarian}`, ...patientSections].join("\n\n");
     });
     return [title, ...sections].join("\n\n");
+  }
+
+  function groupBy(items, key) {
+    const groups = new Map();
+    items.forEach(item => {
+      const value = key(item);
+      if (!groups.has(value)) groups.set(value, []);
+      groups.get(value).push(item);
+    });
+    return groups;
+  }
+
+  function pendencyOrigin(item) {
+    if (item.origem === "Internação") return "Internação";
+    if (item.origem === "Consulta" || item.origem === "Ciplex") return "Consulta";
+    return item.origem || "Origem não informada";
   }
 
   function copyText(text) {
@@ -706,14 +800,14 @@
     const style = document.createElement("style");
     style.id = "agora-coordination-styles";
     style.textContent = `
-      .agora-overlay{position:fixed;inset:0;z-index:2147483646;background:#092a2488;display:grid;place-items:center;padding:20px;font-family:Arial,sans-serif}.agora-primary{background:#0b594a!important;color:#fff!important;border-color:#0b594a!important}.agora-modal{width:min(560px,96vw);max-height:92vh;overflow:auto;background:#f7f4ec;border-radius:12px;box-shadow:0 24px 80px #001d18aa;color:#17342e}.agora-modal.wide{width:min(980px,96vw)}.agora-modal>header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:18px 22px;background:#052d25;color:#fff}.agora-modal h2{margin:0;font:700 20px Arial}.agora-modal>header button{border:0;background:transparent;color:#fff;font-size:28px;cursor:pointer}.agora-modal-body{padding:22px}.agora-modal label{display:grid;gap:6px;margin-bottom:14px;font-size:12px;font-weight:700;text-transform:uppercase}.agora-modal input,.agora-modal select,.agora-modal textarea{width:100%;box-sizing:border-box;border:1px solid #9ca9a4;border-radius:6px;background:#fff;padding:9px;color:#172b27;font:14px Arial;text-transform:none}.agora-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.agora-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}.agora-actions button{border:1px solid #527068;border-radius:6px;background:#fff;padding:9px 14px;cursor:pointer}.agora-actions .agora-primary{background:#0b594a;color:#fff;border-color:#0b594a}.agora-context{display:flex;justify-content:space-between;gap:12px;margin-bottom:18px;padding:12px;background:#e4ebe7}.agora-context span{color:#52645f}.agora-indicators{display:flex;gap:10px;margin-bottom:18px}.agora-indicators span{min-width:100px;padding:12px;background:#e3eae6;border-radius:8px}.agora-indicators b{display:block;font-size:24px}.agora-indicators .danger{background:#f4d8d3;color:#8b2719}.agora-pending-list{display:grid;gap:12px}.agora-pending-card{padding:16px;border:1px solid #bac7c2;border-left:5px solid #4e756a;border-radius:8px;background:#fff}.agora-pending-card.overdue{border-left-color:#b3392b}.agora-pending-card header{display:flex;align-items:center;gap:10px}.agora-pending-card header span{font-weight:700}.agora-pending-card header b{margin-left:auto}.agora-pending-card header em{padding:3px 6px;background:#fff0c2;font-size:11px}.agora-pending-card p{margin:10px 0}.agora-pending-card small{color:#60706c}.agora-history{margin-top:14px;padding:10px;background:#edf1ef}.agora-history div+div{border-top:1px solid #ccd5d1;margin-top:8px;padding-top:8px}.agora-history p{margin:4px 0 0}.agora-notice{position:fixed;right:18px;bottom:18px;z-index:2147483647;max-width:360px;padding:12px 16px;border-radius:7px;background:#0b594a;color:#fff;font:14px Arial;box-shadow:0 5px 24px #0005}.agora-notice.error{background:#8b2719}.agora-invalid{border-color:#b3392b!important;box-shadow:0 0 0 2px #b3392b22}.agora-criterion{padding:14px;margin-bottom:12px;border:1px solid #c8d2ce;border-radius:8px;background:#fff}.agora-criterion header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.agora-criterion header label{display:flex;align-items:center;gap:6px;margin:0}.agora-criterion header input{width:auto}.agora-consultation-launcher{position:fixed;right:20px;bottom:20px;z-index:2147483000;border:0;border-radius:9px;padding:12px 16px;background:#0b4a3f;color:#fff;font:700 14px Arial;cursor:pointer;box-shadow:0 5px 18px #0003}#agora-consultations-root{position:fixed;inset:0;z-index:2147483500;overflow:auto;background:#f7f5f1;color:#25312e;font-family:Arial,sans-serif}#agora-consultations-root *{box-sizing:border-box}.agora-consultation-page{max-width:1600px;margin:auto;padding:24px}.agora-consultation-page>header{display:flex;justify-content:space-between;gap:20px}.agora-consultation-page h1{margin:0;color:#0b4a3f}.agora-consultation-page p{margin:5px 0;color:#65736f}.agora-consultation-page button{border:0;border-radius:7px;padding:9px 12px;font-weight:700;cursor:pointer}.agora-consultation-toolbar{display:flex;align-items:end;gap:9px;flex-wrap:wrap;margin:18px 0}.agora-consultation-toolbar label{display:grid;gap:4px;font-size:12px;font-weight:700}.agora-consultation-toolbar input,.agora-consultation-toolbar select{border:1px solid #bdc8c4;border-radius:6px;padding:8px;background:#fff}.agora-consultation-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-consultation-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-consultation-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-consultation-table td{padding:9px;border-bottom:1px solid #dbe1de}.agora-consultation-table td:last-child{display:flex;justify-content:space-between;align-items:center;gap:10px}.agora-consultation-name{display:flex;justify-content:space-between;gap:8px}.agora-consultation-name a{color:#0b594a;font-weight:700}.agora-consultation-status{padding:4px 8px;border-radius:999px;background:#fff1cf;color:#795600;font-size:11px;font-weight:700}.agora-consultation-status.ok{background:#dcefe9;color:#0b4a3f}.agora-consultation-status.error{background:#f4e5e3;color:#9d3028}.agora-consultation-empty{padding:35px!important;text-align:center;color:#687671}@media(max-width:650px){.agora-grid{grid-template-columns:1fr}.agora-indicators{flex-wrap:wrap}}
+      .agora-overlay{position:fixed;inset:0;z-index:2147483646;background:#092a2488;display:grid;place-items:center;padding:20px;font-family:Arial,sans-serif}.agora-primary{background:#0b594a!important;color:#fff!important;border-color:#0b594a!important}.agora-modal{width:min(560px,96vw);max-height:92vh;overflow:auto;background:#f7f4ec;border-radius:12px;box-shadow:0 24px 80px #001d18aa;color:#17342e}.agora-modal.wide{width:min(980px,96vw)}.agora-modal>header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:18px 22px;background:#052d25;color:#fff}.agora-modal h2{margin:0;font:700 20px Arial}.agora-modal>header button{border:0;background:transparent;color:#fff;font-size:28px;cursor:pointer}.agora-modal-body{padding:22px}.agora-modal label{display:grid;gap:6px;margin-bottom:14px;font-size:12px;font-weight:700;text-transform:uppercase}.agora-modal input,.agora-modal select,.agora-modal textarea{width:100%;box-sizing:border-box;border:1px solid #9ca9a4;border-radius:6px;background:#fff;padding:9px;color:#172b27;font:14px Arial;text-transform:none}.agora-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.agora-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}.agora-actions button{border:1px solid #527068;border-radius:6px;background:#fff;padding:9px 14px;cursor:pointer}.agora-actions .agora-primary{background:#0b594a;color:#fff;border-color:#0b594a}.agora-context{display:flex;justify-content:space-between;gap:12px;margin-bottom:18px;padding:12px;background:#e4ebe7}.agora-context span{color:#52645f}.agora-indicators{display:flex;gap:10px;margin-bottom:18px}.agora-indicators span{min-width:100px;padding:12px;background:#e3eae6;border-radius:8px}.agora-indicators b{display:block;font-size:24px}.agora-indicators .danger{background:#f4d8d3;color:#8b2719}.agora-pending-list{display:grid;gap:12px}.agora-pending-card{padding:16px;border:1px solid #bac7c2;border-left:5px solid #4e756a;border-radius:8px;background:#fff}.agora-pending-card.overdue{border-left-color:#b3392b}.agora-pending-card header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.agora-pending-card header span{font-weight:700}.agora-pending-card header b{margin-left:auto}.agora-pending-card header em,.agora-origin,.agora-pending-card header code{padding:3px 7px;border-radius:999px;font:700 11px Arial;font-style:normal}.agora-pending-card header em{background:#fff0c2}.agora-origin.hospital{background:#dbe9f5;color:#245a83}.agora-origin.consultation{background:#dcefe5;color:#176345}.agora-pending-card header code{background:#ece9e0;color:#46534f}.agora-pending-card p{margin:10px 0}.agora-pending-card small{color:#60706c}.agora-latest-observation{margin:12px 0;padding:10px 12px;border-left:3px solid #d8892f;background:#faf3e7}.agora-latest-observation>b{font-size:12px;text-transform:uppercase}.agora-latest-observation p{margin:5px 0}.agora-history{margin-top:14px;padding:10px;background:#edf1ef}.agora-history div+div{border-top:1px solid #ccd5d1;margin-top:8px;padding-top:8px}.agora-history p{margin:4px 0 0}.agora-notice{position:fixed;right:18px;bottom:18px;z-index:2147483647;max-width:360px;padding:12px 16px;border-radius:7px;background:#0b594a;color:#fff;font:14px Arial;box-shadow:0 5px 24px #0005}.agora-notice.error{background:#8b2719}.agora-invalid{border-color:#b3392b!important;box-shadow:0 0 0 2px #b3392b22}.agora-criterion{padding:14px;margin-bottom:12px;border:1px solid #c8d2ce;border-radius:8px;background:#fff}.agora-criterion header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.agora-criterion header label{display:flex;align-items:center;gap:6px;margin:0}.agora-criterion header input{width:auto}.agora-consultation-launcher{position:fixed;right:20px;bottom:20px;z-index:2147483000;border:0;border-radius:9px;padding:12px 16px;background:#0b4a3f;color:#fff;font:700 14px Arial;cursor:pointer;box-shadow:0 5px 18px #0003}#agora-consultations-root{position:fixed;inset:0;z-index:2147483500;overflow:auto;background:#f7f5f1;color:#25312e;font-family:Arial,sans-serif}#agora-consultations-root *{box-sizing:border-box}.agora-consultation-page{max-width:1600px;margin:auto;padding:24px}.agora-consultation-page>header{display:flex;justify-content:space-between;gap:20px}.agora-consultation-page h1{margin:0;color:#0b4a3f}.agora-consultation-page p{margin:5px 0;color:#65736f}.agora-consultation-page button{border:0;border-radius:7px;padding:9px 12px;font-weight:700;cursor:pointer}.agora-consultation-toolbar{display:flex;align-items:end;gap:9px;flex-wrap:wrap;margin:18px 0}.agora-consultation-toolbar label{display:grid;gap:4px;font-size:12px;font-weight:700}.agora-consultation-toolbar input,.agora-consultation-toolbar select{border:1px solid #bdc8c4;border-radius:6px;padding:8px;background:#fff}.agora-consultation-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-consultation-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-consultation-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-consultation-table td{padding:9px;border-bottom:1px solid #dbe1de}.agora-consultation-table td:last-child{display:flex;justify-content:space-between;align-items:center;gap:10px}.agora-consultation-name{display:flex;justify-content:space-between;gap:8px}.agora-consultation-name a{color:#0b594a;font-weight:700}.agora-consultation-status{padding:4px 8px;border-radius:999px;background:#fff1cf;color:#795600;font-size:11px;font-weight:700}.agora-consultation-status.ok{background:#dcefe9;color:#0b4a3f}.agora-consultation-status.error{background:#f4e5e3;color:#9d3028}.agora-consultation-empty{padding:35px!important;text-align:center;color:#687671}@media(max-width:650px){.agora-grid{grid-template-columns:1fr}.agora-indicators{flex-wrap:wrap}}
     `;
     style.textContent += `
       .agora-dashboard-launcher{position:fixed;right:20px;bottom:72px;z-index:2147483000;border:0;border-radius:9px;padding:12px 16px;background:#d8892f;color:#fff;font:700 14px Arial;cursor:pointer;box-shadow:0 5px 18px #0003}
       #agora-dashboard-root{position:fixed;inset:0;z-index:2147483550;overflow:auto;background:#f2f0e9;color:#21352f;font-family:Arial,sans-serif}
       #agora-dashboard-root *{box-sizing:border-box}.agora-dashboard-page{max-width:1450px;margin:auto;padding:24px}.agora-dashboard-page>header{display:flex;justify-content:space-between;gap:20px;margin-bottom:18px}.agora-dashboard-page h1{margin:0;color:#0b4a3f}.agora-dashboard-page p{margin:5px 0;color:#66736f}.agora-dashboard-page button{border:1px solid #9baba5;border-radius:7px;padding:9px 12px;background:#fff;font-weight:700;cursor:pointer}
       .agora-dashboard-filters{display:grid;grid-template-columns:2fr repeat(5,1fr);gap:9px;padding:14px;background:#fff;border:1px solid #d1d9d5;border-radius:9px}.agora-dashboard-filters label{display:grid;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase}.agora-dashboard-filters input,.agora-dashboard-filters select{min-width:0;width:100%;border:1px solid #bac7c2;border-radius:6px;padding:8px;background:#fff}
-      .agora-dashboard-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:12px 0}.agora-dashboard-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px}.agora-dashboard-list .agora-pending-card{min-width:0}.agora-report-text{width:100%;box-sizing:border-box;border:1px solid #bac7c2;border-radius:7px;padding:12px;background:#fff;color:#20352f;font:13px/1.45 Consolas,monospace;resize:vertical}
+      .agora-dashboard-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:12px 0}.agora-dashboard-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px}.agora-dashboard-list .agora-pending-card{min-width:0}.agora-report-options{display:flex;gap:8px;margin-bottom:12px}.agora-report-options button{border:1px solid #8fa39c;border-radius:999px;padding:8px 14px;background:#fff;color:#27453d;font-weight:700;cursor:pointer}.agora-report-options button.active{background:#0b594a;color:#fff;border-color:#0b594a}.agora-report-text{width:100%;box-sizing:border-box;border:1px solid #bac7c2;border-radius:7px;padding:12px;background:#fff;color:#20352f;font:13px/1.45 Consolas,monospace;resize:vertical}
       @media(max-width:1050px){.agora-dashboard-filters{grid-template-columns:repeat(3,1fr)}.agora-dashboard-filters label:first-child{grid-column:span 3}}
       @media(max-width:650px){.agora-dashboard-filters{grid-template-columns:1fr}.agora-dashboard-filters label:first-child{grid-column:auto}.agora-dashboard-list{grid-template-columns:1fr}.agora-dashboard-page{padding:12px}}
     `;
