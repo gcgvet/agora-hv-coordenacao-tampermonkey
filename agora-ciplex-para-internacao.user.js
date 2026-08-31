@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Ágora - Ciplex para Internação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      1.1.0
-// @description  Abre ou cria a ficha de internação a partir do paciente aberto no Ciplex.
+// @version      1.1.1
+// @description  Abre ou cria a ficha de internação a partir do paciente aberto no Ciplex, com bloqueio durante o envio.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
 // @run-at       document-idle
@@ -25,6 +25,7 @@
   const BUTTON_CLASS = "agora-enviar-internacao";
   const inFlightAnimalIds = new Set();
   let injectionTimer;
+  let loadingOperations = 0;
 
   if (typeof GM_registerMenuCommand === "function") {
     GM_registerMenuCommand("Configurar caminho da ficha de internação", configureSiteUrl);
@@ -123,7 +124,7 @@
   }
 
   function sendPatient(patient) {
-    return new Promise((resolve, reject) => {
+    return withLoading("Preparando ficha de internação...", () => new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "POST",
         url: WEB_APP_URL,
@@ -155,7 +156,40 @@
           reject(new Error("Não foi possível acessar o Apps Script."));
         }
       });
-    });
+    }));
+  }
+
+  async function withLoading(message, operation) {
+    let overlay = document.querySelector("#agora-internacao-loading");
+    if (!overlay) {
+      const style = document.createElement("style");
+      style.textContent = `
+        #agora-internacao-loading{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:24px;background:#052d25d9;color:#fff;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .16s ease,visibility .16s ease;font-family:Arial,sans-serif}
+        #agora-internacao-loading.visible{opacity:1;visibility:visible;pointer-events:all}#agora-internacao-loading>div{min-width:min(340px,calc(100vw - 48px));padding:30px 28px;border:1px solid #c0f6ff88;border-radius:9px;background:#052d25;box-shadow:0 18px 60px #0006;text-align:center}
+        #agora-internacao-loading i{display:block;width:54px;height:54px;margin:0 auto 18px;border:5px solid #c0f6ff3d;border-top-color:#c0f6ff;border-radius:50%;animation:agora-internacao-spin .75s linear infinite}#agora-internacao-loading strong,#agora-internacao-loading small{display:block}#agora-internacao-loading strong{font-size:18px}#agora-internacao-loading small{margin-top:7px;color:#c0f6ff;font-size:12px}
+        @keyframes agora-internacao-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){#agora-internacao-loading{transition:none}#agora-internacao-loading i{animation-duration:1.5s}}
+      `;
+      document.head.append(style);
+      overlay = document.createElement("div");
+      overlay.id = "agora-internacao-loading";
+      overlay.setAttribute("role", "status");
+      overlay.setAttribute("aria-live", "assertive");
+      overlay.innerHTML = `<div><i aria-hidden="true"></i><strong></strong><small>Aguarde a conclusão para continuar.</small></div>`;
+      document.body.append(overlay);
+    }
+    loadingOperations += 1;
+    overlay.querySelector("strong").textContent = message;
+    overlay.classList.add("visible");
+    document.body.setAttribute("aria-busy", "true");
+    try {
+      return await operation();
+    } finally {
+      loadingOperations -= 1;
+      if (!loadingOperations) {
+        overlay.classList.remove("visible");
+        document.body.removeAttribute("aria-busy");
+      }
+    }
   }
 
   function normalizeSiteUrl(input) {

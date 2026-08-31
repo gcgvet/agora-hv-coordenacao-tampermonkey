@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.3
+// @version      0.5.4
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -30,6 +30,7 @@
   const SITE_PAGE = /\/(?:index\.html)?$/i;
   let consultationRecords = [];
   let dashboardPendencies = [];
+  let loadingOperations = 0;
 
   if (location.protocol === "file:" && SITE_PAGE.test(location.pathname)) initializeHospitalReview();
   if (location.origin === "https://ciplexsistemas.com") {
@@ -225,7 +226,14 @@
   }
 
   function apiRequest(action, payload = {}) {
-    return new Promise((resolve, reject) => {
+    const messages = {
+      createPendencia: "Registrando pendência...",
+      listPendencias: "Carregando pendências...",
+      updatePendencia: "Salvando alteração...",
+      listHistorico: "Carregando histórico...",
+      export: "Preparando exportação..."
+    };
+    return withLoading(messages[action] || "Processando dados...", () => new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "POST",
         url: WEB_APP_URL,
@@ -246,7 +254,33 @@
         ontimeout() { reject(new Error("O Apps Script não respondeu a tempo.")); },
         onerror() { reject(new Error("Não foi possível acessar o Apps Script.")); }
       });
-    });
+    }));
+  }
+
+  async function withLoading(message, operation) {
+    injectStyles();
+    let overlay = document.querySelector("#agora-loading-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "agora-loading-overlay";
+      overlay.setAttribute("role", "status");
+      overlay.setAttribute("aria-live", "assertive");
+      overlay.innerHTML = `<div><i aria-hidden="true"></i><strong></strong><small>Aguarde a conclusão para continuar.</small></div>`;
+      document.body.append(overlay);
+    }
+    loadingOperations += 1;
+    overlay.querySelector("strong").textContent = message;
+    overlay.classList.add("visible");
+    document.body.setAttribute("aria-busy", "true");
+    try {
+      return await operation();
+    } finally {
+      loadingOperations -= 1;
+      if (!loadingOperations) {
+        overlay.classList.remove("visible");
+        document.body.removeAttribute("aria-busy");
+      }
+    }
   }
 
   function isOverdue(item) {
@@ -572,9 +606,11 @@
     try {
       const period = `${isoToBrazilian(start)} - ${isoToBrazilian(end)}`;
       const endpoint = `/sistema/relatorios_atendimento/exibir_atendimentos_realizados?${new URLSearchParams({ "data[periodo]": period })}`;
-      const response = await fetch(endpoint, { credentials: "include", headers: { "X-Requested-With": "XMLHttpRequest" } });
-      if (!response.ok) throw new Error(`O Ciplex respondeu com o código ${response.status}.`);
-      const text = await response.text();
+      const text = await withLoading("Buscando consultas no Ciplex...", async () => {
+        const response = await fetch(endpoint, { credentials: "include", headers: { "X-Requested-With": "XMLHttpRequest" } });
+        if (!response.ok) throw new Error(`O Ciplex respondeu com o código ${response.status}.`);
+        return response.text();
+      });
       if (/login|entrar no sistema/i.test(text) && !/<table/i.test(text)) throw new Error("A sessão do Ciplex parece ter expirado.");
       consultationRecords = extractConsultations(text);
       renderConsultations();
@@ -810,6 +846,12 @@
       .agora-dashboard-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:12px 0}.agora-dashboard-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px}.agora-dashboard-list .agora-pending-card{min-width:0}.agora-report-options{display:flex;gap:8px;margin-bottom:12px}.agora-report-options button{border:1px solid #8fa39c;border-radius:999px;padding:8px 14px;background:#fff;color:#27453d;font-weight:700;cursor:pointer}.agora-report-options button.active{background:#0b594a;color:#fff;border-color:#0b594a}.agora-report-text{width:100%;box-sizing:border-box;border:1px solid #bac7c2;border-radius:7px;padding:12px;background:#fff;color:#20352f;font:13px/1.45 Consolas,monospace;resize:vertical}
       @media(max-width:1050px){.agora-dashboard-filters{grid-template-columns:repeat(3,1fr)}.agora-dashboard-filters label:first-child{grid-column:span 3}}
       @media(max-width:650px){.agora-dashboard-filters{grid-template-columns:1fr}.agora-dashboard-filters label:first-child{grid-column:auto}.agora-dashboard-list{grid-template-columns:1fr}.agora-dashboard-page{padding:12px}}
+    `;
+    style.textContent += `
+      #agora-loading-overlay{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;padding:24px;background:#052d25d9;color:#fff;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .16s ease,visibility .16s ease;font-family:Arial,sans-serif}
+      #agora-loading-overlay.visible{opacity:1;visibility:visible;pointer-events:all}#agora-loading-overlay>div{min-width:min(340px,calc(100vw - 48px));padding:30px 28px;border:1px solid #c0f6ff88;border-radius:9px;background:#052d25;box-shadow:0 18px 60px #0006;text-align:center}
+      #agora-loading-overlay i{display:block;width:54px;height:54px;margin:0 auto 18px;border:5px solid #c0f6ff3d;border-top-color:#c0f6ff;border-radius:50%;animation:agora-loading-spin .75s linear infinite}#agora-loading-overlay strong,#agora-loading-overlay small{display:block}#agora-loading-overlay strong{font-size:18px}#agora-loading-overlay small{margin-top:7px;color:#c0f6ff;font-size:12px}
+      @keyframes agora-loading-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){#agora-loading-overlay{transition:none}#agora-loading-overlay i{animation-duration:1.5s}}
     `;
     document.head.append(style);
   }
