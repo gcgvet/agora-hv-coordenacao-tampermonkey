@@ -12,7 +12,7 @@
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @updateURL    https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/sidebar-coordenacao/agora-hv-coordenacao.user.js
-// @downloadURL  https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-hv-coordenacao.user.js
+// @downloadURL  https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/sidebar-coordenacao/agora-hv-coordenacao.user.js
 // ==/UserScript==
 
 (function () {
