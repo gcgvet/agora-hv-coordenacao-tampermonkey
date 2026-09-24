@@ -31,6 +31,7 @@
   let consultationRecords = [];
   let dashboardPendencies = [];
   let loadingOperations = 0;
+  let activePanelHistory = null;
 
   if (location.protocol === "file:" && SITE_PAGE.test(location.pathname)) initializeHospitalReview();
   if (location.origin === "https://ciplexsistemas.com") {
@@ -325,6 +326,29 @@
     }
   }
 
+  function beginPanelHistory(panel) {
+    if (activePanelHistory) return;
+    history.pushState({ ...(history.state || {}), agoraCoordPanel: panel }, "", location.href);
+    activePanelHistory = panel;
+  }
+
+  function closeCoordinationPanel(restoreHistory = false) {
+    const hadPanel = Boolean(document.querySelector("#agora-dashboard-root, #agora-consultations-root"));
+    document.querySelectorAll("#agora-dashboard-root, #agora-consultations-root, .agora-overlay").forEach(element => element.remove());
+    if (restoreHistory && hadPanel && activePanelHistory) {
+      activePanelHistory = null;
+      history.back();
+    }
+  }
+
+  function handleCoordinationHistory() {
+    if (!activePanelHistory) return;
+    activePanelHistory = null;
+    closeCoordinationPanel();
+  }
+
+  window.addEventListener("popstate", handleCoordinationHistory);
+
   function createSidebarAction(label, id, icon, handler) {
     const item = document.createElement("li");
     item.id = id;
@@ -345,6 +369,7 @@
 
   async function openCoordinationDashboard() {
     if (document.querySelector("#agora-dashboard-root")) return;
+    beginPanelHistory("dashboard");
     const root = document.createElement("section");
     root.id = "agora-dashboard-root";
     root.innerHTML = `<main class="agora-dashboard-page">
@@ -362,7 +387,7 @@
       <div class="agora-dashboard-list" data-dashboard-list><p>Carregando pendências...</p></div>
     </main>`;
     document.body.append(root);
-    root.querySelector("[data-dashboard-close]").addEventListener("click", () => root.remove());
+    root.querySelector("[data-dashboard-close]").addEventListener("click", () => closeCoordinationPanel(true));
     root.querySelectorAll(".agora-dashboard-filters input,.agora-dashboard-filters select").forEach(control => control.addEventListener("input", renderDashboard));
     root.querySelector("[data-dashboard-refresh]").addEventListener("click", loadDashboardPendencies);
     root.querySelector("[data-dashboard-report]").addEventListener("click", openDashboardReport);
@@ -587,6 +612,7 @@
 
   function openConsultationControl() {
     if (document.querySelector("#agora-consultations-root")) return;
+    beginPanelHistory("consultations");
     const today = todayISO();
     const root = document.createElement("section");
     root.id = "agora-consultations-root";
@@ -603,7 +629,7 @@
       <div class="agora-consultation-table"><table><thead><tr><th>Cliente</th><th>Animal</th><th>Data</th><th>Médico Veterinário</th><th>Avaliação</th></tr></thead><tbody></tbody></table></div>
     </main>`;
     document.body.append(root);
-    root.querySelector("[data-consultation-close]").addEventListener("click", () => root.remove());
+    root.querySelector("[data-consultation-close]").addEventListener("click", () => closeCoordinationPanel(true));
     root.querySelector("[data-consultation-fetch]").addEventListener("click", fetchConsultations);
     root.querySelector("[data-consultation-copy]").addEventListener("click", copyVeterinarianReport);
     root.querySelector("[data-consultation-export]").addEventListener("click", exportConsultationsXls);
