@@ -424,7 +424,7 @@
         <label>Veterinário<select data-dashboard-veterinarian><option value="">Todos</option></select></label>
         <label>Destaque<select data-dashboard-highlight><option value="">Todos</option><option value="overdue">Vencidas</option><option value="recurrent">Reincidentes</option></select></label>
       </div>
-      <div class="agora-dashboard-actions"><button type="button" data-dashboard-report>Relatório</button><button type="button" data-dashboard-csv>Exportar CSV</button><button type="button" class="agora-primary" data-dashboard-refresh>Atualizar</button></div>
+      <div class="agora-dashboard-actions"><button type="button" data-dashboard-report>Relatório</button><button type="button" data-dashboard-csv>Exportar CSV</button><button type="button" class="agora-primary" data-dashboard-save-all>Salvar todas</button><button type="button" class="agora-primary" data-dashboard-refresh>Atualizar</button></div>
       <div class="agora-indicators" data-dashboard-indicators></div>
       <div class="agora-dashboard-list" data-dashboard-list><p>Carregando pendências...</p></div>
     </main>`;
@@ -434,16 +434,17 @@
     root.querySelector("[data-dashboard-refresh]").addEventListener("click", loadDashboardPendencies);
     root.querySelector("[data-dashboard-report]").addEventListener("click", openDashboardReport);
     root.querySelector("[data-dashboard-csv]").addEventListener("click", () => exportOperationalData("csv"));
+    root.querySelector("[data-dashboard-save-all]").addEventListener("click", saveAllDashboardPending);
     await loadDashboardPendencies();
   }
 
-  async function loadDashboardPendencies() {
+  async function loadDashboardPendencies(background = false) {
     const root = document.querySelector("#agora-dashboard-root");
     if (!root) return;
     const refresh = root.querySelector("[data-dashboard-refresh]");
     refresh.disabled = true;
     try {
-      const result = await apiRequest("listPendencias");
+      const result = await apiRequest("listPendencias", {}, { blocking: !background });
       dashboardPendencies = result.pendencias;
       updateDashboardVeterinarians();
       renderDashboard();
@@ -497,23 +498,50 @@
     list.querySelectorAll("[data-history-pending]").forEach(button => button.addEventListener("click", showHistory));
   }
 
-  async function updateDashboardPending(event) {
+  function dashboardPendingPayload(card, id) {
+    return {
+      id,
+      status: card.querySelector("[data-status]").value,
+      observacao: card.querySelector("[data-observation]").value.trim(),
+      usuario: "Coordenadora"
+    };
+  }
+
+  function updateDashboardPending(event) {
     const button = event.currentTarget;
     const card = button.closest("[data-pending-id]");
+    if (button.disabled) return;
     button.disabled = true;
-    try {
-      await apiRequest("updatePendencia", { pendencia: {
-        id: button.dataset.updatePending,
-        status: card.querySelector("[data-status]").value,
-        observacao: card.querySelector("[data-observation]").value.trim(),
-        usuario: "Coordenadora"
-      } });
-      notify("Pendência atualizada.");
-      await loadDashboardPendencies();
-    } catch (error) {
+    runBackgroundSave(() => apiRequest("updatePendencia", { pendencia: dashboardPendingPayload(card, button.dataset.updatePending) }, { blocking: false }))
+      .then(() => {
+        notify("Pendência atualizada.");
+        loadDashboardPendencies(true);
+      })
+      .catch(error => {
+        notify(error.message, true);
+        button.disabled = false;
+      });
+  }
+
+  function saveAllDashboardPending(event) {
+    const button = event?.currentTarget || document.querySelector("[data-dashboard-save-all]");
+    const cards = [...document.querySelectorAll("#agora-dashboard-root [data-pending-id]")];
+    if (!cards.length) return notify("Não há pendências exibidas para salvar.", true);
+    if (button?.disabled) return;
+    const payloads = cards.map(card => dashboardPendingPayload(card, card.dataset.pendingId));
+    button.disabled = true;
+    runBackgroundSave(async () => {
+      for (const pendencia of payloads) {
+        await apiRequest("updatePendencia", { pendencia }, { blocking: false });
+      }
+    }).then(() => {
+      notify(`Pendências salvas: ${payloads.length}.`);
+      loadDashboardPendencies(true);
+    }).catch(error => {
       notify(error.message, true);
+    }).finally(() => {
       button.disabled = false;
-    }
+    });
   }
 
   function openDashboardReport() {
@@ -774,29 +802,40 @@
     overlay.querySelector("form").addEventListener("submit", saveConsultationReview);
   }
 
-  async function saveConsultationReview(event) {
+  function saveConsultationReview(event) {
     event.preventDefault();
     const overlay = event.currentTarget.closest(".agora-overlay");
     const record = consultationRecords.find(item => item.id === overlay.dataset.consultationId);
     const submit = event.submitter;
     let invalid;
-    CONSULTATION_CRITERIA.forEach(criterion => {
+    const changes = CONSULTATION_CRITERIA.map(criterion => {
       const adequate = overlay.querySelector(`[data-criterion-adequate="${criterion.key}"]`).checked;
-      const comment = overlay.querySelector(`[data-criterion-comment="${criterion.key}"]`);
-      comment.classList.toggle("agora-invalid", !adequate && !comment.value.trim());
-      if (!adequate && !comment.value.trim()) invalid ||= comment;
+      const comment = overlay.querySelector(`[data-criterion-comment="${criterion.key}"]`).value.trim();
+      return { criterion, adequate, comment };
+    });
+    changes.forEach(({ adequate, comment, criterion }) => {
+      const field = overlay.querySelector(`[data-criterion-comment="${criterion.key}"]`);
+      field.classList.toggle("agora-invalid", !adequate && !comment);
+      if (!adequate && !comment) invalid ||= field;
     });
     if (invalid) {
       invalid.focus();
       return notify("Descreva cada critério marcado como inadequado.", true);
     }
+    const general = overlay.querySelector("[data-consultation-general]").value.trim();
     submit.disabled = true;
     submit.textContent = "Salvando...";
-    try {
-      const pendingResult = await apiRequest("listPendencias");
-      for (const criterion of CONSULTATION_CRITERIA) {
-        const adequate = overlay.querySelector(`[data-criterion-adequate="${criterion.key}"]`).checked;
-        const comment = overlay.querySelector(`[data-criterion-comment="${criterion.key}"]`).value.trim();
+    changes.forEach(({ criterion, adequate, comment }) => {
+      record.criterios[criterion.key] = { adequado: adequate, comentario: comment };
+    });
+    record.observacoesGerais = general;
+    record.avaliado = true;
+    overlay.remove();
+    renderConsultations();
+    notify("Avaliação enviada para salvamento.");
+    runBackgroundSave(async () => {
+      const pendingResult = await apiRequest("listPendencias", {}, { blocking: false });
+      for (const { criterion, adequate, comment } of changes) {
         const originId = consultationOriginId(record, criterion.key);
         const existing = pendingResult.pendencias.find(item => item.origemRegistro === originId);
         if (!adequate) {
@@ -811,26 +850,17 @@
             origem: "Consulta",
             descricao: `${criterion.label}: ${comment}`,
             status: existing?.status === "Encerrada" ? "Aberta" : existing?.status || "Aberta",
-            observacoes: overlay.querySelector("[data-consultation-general]").value.trim(),
+            observacoes: general,
             observacao: existing ? "Critério de consulta reavaliado." : "Pendência criada pela avaliação de consulta.",
             usuario: "Coordenadora"
           };
-          await apiRequest(existing ? "updatePendencia" : "createPendencia", { pendencia: pending });
+          await apiRequest(existing ? "updatePendencia" : "createPendencia", { pendencia: pending }, { blocking: false });
         } else if (existing && !["Resolvida", "Encerrada"].includes(existing.status)) {
-          await apiRequest("updatePendencia", { pendencia: { id: existing.id, status: "Resolvida", observacao: "Critério reavaliado como adequado.", usuario: "Coordenadora" } });
+          await apiRequest("updatePendencia", { pendencia: { id: existing.id, status: "Resolvida", observacao: "Critério reavaliado como adequado.", usuario: "Coordenadora" } }, { blocking: false });
         }
-        record.criterios[criterion.key] = { adequado: adequate, comentario: comment };
       }
-      record.observacoesGerais = overlay.querySelector("[data-consultation-general]").value.trim();
-      record.avaliado = true;
-      overlay.remove();
-      renderConsultations();
-      notify("Avaliação salva e pendências sincronizadas.");
-    } catch (error) {
-      notify(error.message, true);
-      submit.disabled = false;
-      submit.textContent = "Salvar avaliação";
-    }
+    }).then(() => notify("Avaliação salva e pendências sincronizadas."))
+      .catch(error => notify(error.message, true));
   }
 
   function consultationOriginId(record, criterion) {
@@ -920,7 +950,7 @@
     const style = document.createElement("style");
     style.id = "agora-coordination-styles";
     style.textContent = `
-      .agora-overlay{position:fixed;inset:0;z-index:2147483646;background:#092a2488;display:grid;place-items:center;padding:20px;font-family:Arial,sans-serif}.agora-primary{background:#0b594a!important;color:#fff!important;border-color:#0b594a!important}.agora-modal{width:min(560px,96vw);max-height:92vh;overflow:auto;background:#f7f4ec;border-radius:12px;box-shadow:0 24px 80px #001d18aa;color:#17342e}.agora-modal.wide{width:min(980px,96vw)}.agora-modal>header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:18px 22px;background:#052d25;color:#fff}.agora-modal h2{margin:0;font:700 20px Arial}.agora-modal>header button{border:0;background:transparent;color:#fff;font-size:28px;cursor:pointer}.agora-modal-body{padding:22px}.agora-modal label{display:grid;gap:6px;margin-bottom:14px;font-size:12px;font-weight:700;text-transform:uppercase}.agora-modal input,.agora-modal select,.agora-modal textarea{width:100%;box-sizing:border-box;border:1px solid #9ca9a4;border-radius:6px;background:#fff;padding:9px;color:#172b27;font:14px Arial;text-transform:none}.agora-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.agora-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}.agora-actions button{border:1px solid #527068;border-radius:6px;background:#fff;padding:9px 14px;cursor:pointer}.agora-actions .agora-primary{background:#0b594a;color:#fff;border-color:#0b594a}.agora-context{display:flex;justify-content:space-between;gap:12px;margin-bottom:18px;padding:12px;background:#e4ebe7}.agora-context span{color:#52645f}.agora-indicators{display:flex;gap:10px;margin-bottom:18px}.agora-indicators span{min-width:100px;padding:12px;background:#e3eae6;border-radius:8px}.agora-indicators b{display:block;font-size:24px}.agora-indicators .danger{background:#f4d8d3;color:#8b2719}.agora-pending-list{display:grid;gap:12px}.agora-pending-card{padding:16px;border:1px solid #bac7c2;border-left:5px solid #4e756a;border-radius:8px;background:#fff}.agora-pending-card.overdue{border-left-color:#b3392b}.agora-pending-card header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.agora-pending-card header span{font-weight:700}.agora-pending-card header b{margin-left:auto}.agora-pending-card header em,.agora-origin,.agora-pending-card header code{padding:3px 7px;border-radius:999px;font:700 11px Arial;font-style:normal}.agora-pending-card header em{background:#fff0c2}.agora-origin.hospital{background:#dbe9f5;color:#245a83}.agora-origin.consultation{background:#dcefe5;color:#176345}.agora-pending-card header code{background:#ece9e0;color:#46534f}.agora-pending-card p{margin:10px 0}.agora-pending-card small{color:#60706c}.agora-latest-observation{margin:12px 0;padding:10px 12px;border-left:3px solid #d8892f;background:#faf3e7}.agora-latest-observation>b{font-size:12px;text-transform:uppercase}.agora-latest-observation p{margin:5px 0}.agora-history{margin-top:14px;padding:10px;background:#edf1ef}.agora-history div+div{border-top:1px solid #ccd5d1;margin-top:8px;padding-top:8px}.agora-history p{margin:4px 0 0}.agora-notice{position:fixed;right:18px;bottom:18px;z-index:2147483647;max-width:360px;padding:12px 16px;border-radius:7px;background:#0b594a;color:#fff;font:14px Arial;box-shadow:0 5px 24px #0005}.agora-notice.error{background:#8b2719}.agora-invalid{border-color:#b3392b!important;box-shadow:0 0 0 2px #b3392b22}.agora-criterion{padding:14px;margin-bottom:12px;border:1px solid #c8d2ce;border-radius:8px;background:#fff}.agora-criterion header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.agora-criterion header label{display:flex;align-items:center;gap:6px;margin:0}.agora-criterion header input{width:auto}.agora-consultation-launcher{position:fixed;right:20px;bottom:20px;z-index:2147483000;border:0;border-radius:9px;padding:12px 16px;background:#0b4a3f;color:#fff;font:700 14px Arial;cursor:pointer;box-shadow:0 5px 18px #0003}#agora-consultations-root{position:fixed;inset:0;z-index:2147483500;overflow:auto;background:#f7f5f1;color:#25312e;font-family:Arial,sans-serif}#agora-consultations-root *{box-sizing:border-box}.agora-consultation-page{max-width:1600px;margin:auto;padding:24px}.agora-consultation-page>header{display:flex;justify-content:space-between;gap:20px}.agora-consultation-page h1{margin:0;color:#0b4a3f}.agora-consultation-page p{margin:5px 0;color:#65736f}.agora-consultation-page button{border:0;border-radius:7px;padding:9px 12px;font-weight:700;cursor:pointer}.agora-consultation-toolbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin:18px 0}.agora-consultation-toolbar label{display:flex;flex-direction:column;gap:5px;min-width:140px;font-size:12px;font-weight:700;line-height:1.2}.agora-consultation-toolbar input,.agora-consultation-toolbar select{height:38px;border:1px solid #bdc8c4;border-radius:6px;padding:8px;background:#fff;line-height:1.2}.agora-consultation-toolbar [data-consultation-start],.agora-consultation-toolbar [data-consultation-end]{width:140px}.agora-consultation-toolbar [data-consultation-veterinarian]{width:280px;min-width:280px}.agora-consultation-toolbar>button{height:38px;white-space:nowrap}.agora-consultation-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-consultation-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-consultation-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-consultation-table td{padding:9px;border-bottom:1px solid #dbe1de}.agora-consultation-table td:last-child{display:flex;justify-content:space-between;align-items:center;gap:10px}.agora-consultation-name{display:flex;justify-content:space-between;gap:8px}.agora-consultation-name a{color:#0b594a;font-weight:700}.agora-consultation-status{padding:4px 8px;border-radius:999px;background:#fff1cf;color:#795600;font-size:11px;font-weight:700}.agora-consultation-status.ok{background:#dcefe9;color:#0b4a3f}.agora-consultation-status.error{background:#f4e5e3;color:#9d3028}.agora-consultation-empty{padding:35px!important;text-align:center;color:#687671}@media(max-width:650px){.agora-grid{grid-template-columns:1fr}.agora-indicators{flex-wrap:wrap}}
+      .agora-overlay{position:fixed;inset:0;z-index:2147483646;background:#092a2488;display:grid;place-items:center;padding:20px;font-family:Arial,sans-serif}.agora-primary{background:#0b594a!important;color:#fff!important;border-color:#0b594a!important}.agora-modal{width:min(560px,96vw);max-height:92vh;overflow:auto;background:#f7f4ec;border-radius:12px;box-shadow:0 24px 80px #001d18aa;color:#17342e}.agora-modal.wide{width:min(980px,96vw)}.agora-modal>header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:18px 22px;background:#052d25;color:#fff}.agora-modal h2{margin:0;font:700 20px Arial}.agora-modal>header button{border:0;background:transparent;color:#fff;font-size:28px;cursor:pointer}.agora-modal-body{padding:22px}.agora-modal label{display:grid;gap:6px;margin-bottom:14px;font-size:12px;font-weight:700;text-transform:uppercase}.agora-modal input,.agora-modal select,.agora-modal textarea{width:100%;box-sizing:border-box;border:1px solid #9ca9a4;border-radius:6px;background:#fff;padding:9px;color:#172b27;font:14px Arial;text-transform:none}.agora-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.agora-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}.agora-actions button{border:1px solid #527068;border-radius:6px;background:#fff;padding:9px 14px;cursor:pointer}.agora-actions .agora-primary{background:#0b594a;color:#fff;border-color:#0b594a}.agora-context{display:flex;justify-content:space-between;gap:12px;margin-bottom:18px;padding:12px;background:#e4ebe7}.agora-context span{color:#52645f}.agora-indicators{display:flex;gap:10px;margin-bottom:18px}.agora-indicators span{min-width:100px;padding:12px;background:#e3eae6;border-radius:8px}.agora-indicators b{display:block;font-size:24px}.agora-indicators .danger{background:#f4d8d3;color:#8b2719}.agora-pending-list{display:grid;gap:12px}.agora-pending-card{padding:16px;border:1px solid #bac7c2;border-left:5px solid #4e756a;border-radius:8px;background:#fff}.agora-pending-card.overdue{border-left-color:#b3392b}.agora-pending-card header{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.agora-pending-card header span{font-weight:700}.agora-pending-card header b{margin-left:auto}.agora-pending-card header em,.agora-origin,.agora-pending-card header code{padding:3px 7px;border-radius:999px;font:700 11px Arial;font-style:normal}.agora-pending-card header em{background:#fff0c2}.agora-origin.hospital{background:#dbe9f5;color:#245a83}.agora-origin.consultation{background:#dcefe5;color:#176345}.agora-pending-card header code{background:#ece9e0;color:#46534f}.agora-pending-card p{margin:10px 0}.agora-pending-card small{color:#60706c}.agora-latest-observation{margin:12px 0;padding:10px 12px;border-left:3px solid #d8892f;background:#faf3e7}.agora-latest-observation>b{font-size:12px;text-transform:uppercase}.agora-latest-observation p{margin:5px 0}.agora-history{margin-top:14px;padding:10px;background:#edf1ef}.agora-history div+div{border-top:1px solid #ccd5d1;margin-top:8px;padding-top:8px}.agora-history p{margin:4px 0 0}.agora-notice{position:fixed;right:18px;bottom:18px;z-index:2147483647;max-width:360px;padding:12px 16px;border-radius:7px;background:#0b594a;color:#fff;font:14px Arial;box-shadow:0 5px 24px #0005}#agora-saving-indicator{position:fixed;right:18px;bottom:70px;z-index:2147483647;display:none;align-items:center;gap:8px;padding:10px 13px;border-radius:7px;background:#052d25;color:#fff;font:700 13px Arial;box-shadow:0 5px 24px #0005}#agora-saving-indicator.visible{display:flex}#agora-saving-indicator span{width:14px;height:14px;border:2px solid #ffffff55;border-top-color:#fff;border-radius:50%;animation:agora-saving-spin .8s linear infinite}@keyframes agora-saving-spin{to{transform:rotate(360deg)}}.agora-notice.error{background:#8b2719}.agora-invalid{border-color:#b3392b!important;box-shadow:0 0 0 2px #b3392b22}.agora-criterion{padding:14px;margin-bottom:12px;border:1px solid #c8d2ce;border-radius:8px;background:#fff}.agora-criterion header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.agora-criterion header label{display:flex;align-items:center;gap:6px;margin:0}.agora-criterion header input{width:auto}.agora-consultation-launcher{position:fixed;right:20px;bottom:20px;z-index:2147483000;border:0;border-radius:9px;padding:12px 16px;background:#0b4a3f;color:#fff;font:700 14px Arial;cursor:pointer;box-shadow:0 5px 18px #0003}#agora-consultations-root{position:fixed;inset:0;z-index:2147483500;overflow:auto;background:#f7f5f1;color:#25312e;font-family:Arial,sans-serif}#agora-consultations-root *{box-sizing:border-box}.agora-consultation-page{max-width:1600px;margin:auto;padding:24px}.agora-consultation-page>header{display:flex;justify-content:space-between;gap:20px}.agora-consultation-page h1{margin:0;color:#0b4a3f}.agora-consultation-page p{margin:5px 0;color:#65736f}.agora-consultation-page button{border:0;border-radius:7px;padding:9px 12px;font-weight:700;cursor:pointer}.agora-consultation-toolbar{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin:18px 0}.agora-consultation-toolbar label{display:flex;flex-direction:column;gap:5px;min-width:140px;font-size:12px;font-weight:700;line-height:1.2}.agora-consultation-toolbar input,.agora-consultation-toolbar select{height:38px;border:1px solid #bdc8c4;border-radius:6px;padding:8px;background:#fff;line-height:1.2}.agora-consultation-toolbar [data-consultation-start],.agora-consultation-toolbar [data-consultation-end]{width:140px}.agora-consultation-toolbar [data-consultation-veterinarian]{width:280px;min-width:280px}.agora-consultation-toolbar>button{height:38px;white-space:nowrap}.agora-consultation-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-consultation-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-consultation-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-consultation-table td{padding:9px;border-bottom:1px solid #dbe1de}.agora-consultation-table td:last-child{display:flex;justify-content:space-between;align-items:center;gap:10px}.agora-consultation-name{display:flex;justify-content:space-between;gap:8px}.agora-consultation-name a{color:#0b594a;font-weight:700}.agora-consultation-status{padding:4px 8px;border-radius:999px;background:#fff1cf;color:#795600;font-size:11px;font-weight:700}.agora-consultation-status.ok{background:#dcefe9;color:#0b4a3f}.agora-consultation-status.error{background:#f4e5e3;color:#9d3028}.agora-consultation-empty{padding:35px!important;text-align:center;color:#687671}@media(max-width:650px){.agora-grid{grid-template-columns:1fr}.agora-indicators{flex-wrap:wrap}}
     `;
     style.textContent += `
       .agora-dashboard-launcher{position:fixed;right:20px;bottom:72px;z-index:2147483000;border:0;border-radius:9px;padding:12px 16px;background:#d8892f;color:#fff;font:700 14px Arial;cursor:pointer;box-shadow:0 5px 18px #0003}
