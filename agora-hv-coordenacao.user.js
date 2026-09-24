@@ -321,7 +321,7 @@
       nav.appendChild(createSidebarAction("Painel coordenação", "agora-sidebar-dashboard", "fa-clipboard-check", openCoordinationDashboard));
     }
     if (!document.querySelector("#agora-sidebar-consultations")) {
-      nav.appendChild(createSidebarAction("Avaliação de consultas", "agora-sidebar-consultations", "fa-stethoscope", openConsultationControl));
+      nav.appendChild(createSidebarAction("Revisão consultas", "agora-sidebar-consultations", "fa-stethoscope", openConsultationControl));
     }
   }
 
