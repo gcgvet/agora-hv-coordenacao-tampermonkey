@@ -385,8 +385,6 @@
     });
   }
 
-  function createSidebarAction
-
   function createSidebarAction(label, id, icon, handler) {
     const item = document.createElement("li");
     item.id = id;
