@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.4
+// @version      0.5.5-test
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -11,7 +11,7 @@
 // @grant        GM_setClipboard
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @updateURL    https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-hv-coordenacao.user.js
+// @updateURL    https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/sidebar-coordenacao/agora-hv-coordenacao.user.js
 // @downloadURL  https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-hv-coordenacao.user.js
 // ==/UserScript==
 
@@ -34,11 +34,9 @@
 
   if (location.protocol === "file:" && SITE_PAGE.test(location.pathname)) initializeHospitalReview();
   if (location.origin === "https://ciplexsistemas.com") {
-    initializeConsultationReview();
-    initializeDashboardLauncher();
+    initializeCoordinationSidebar();
     new MutationObserver(() => {
-      initializeConsultationReview();
-      initializeDashboardLauncher();
+      initializeCoordinationSidebar();
     }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
@@ -314,11 +312,35 @@
     setTimeout(() => notice.remove(), error ? 7000 : 3500);
   }
 
-  function initializeDashboardLauncher() {
-    if (document.querySelector("#agora-open-dashboard")) return;
-    injectStyles();
-    const button = createButton("Painel coordenação", "agora-open-dashboard", "agora-dashboard-launcher", openCoordinationDashboard);
-    document.body.append(button);
+  function initializeCoordinationSidebar() {
+    const sidebar = document.querySelector("#sidebar");
+    const nav = sidebar?.querySelector("ul.nav.nav-list");
+    const collapse = sidebar?.querySelector("#sidebar-collapse");
+    if (!nav || !collapse) return;
+    if (!document.querySelector("#agora-sidebar-dashboard")) {
+      nav.appendChild(createSidebarAction("Painel coordenação", "agora-sidebar-dashboard", "fa-clipboard-check", openCoordinationDashboard));
+    }
+    if (!document.querySelector("#agora-sidebar-consultations")) {
+      nav.appendChild(createSidebarAction("Avaliação de consultas", "agora-sidebar-consultations", "fa-stethoscope", openConsultationControl));
+    }
+  }
+
+  function createSidebarAction(label, id, icon, handler) {
+    const item = document.createElement("li");
+    item.id = id;
+    item.className = "hover agora-sidebar-item";
+    const link = document.createElement("a");
+    link.href = "#";
+    link.setAttribute("role", "button");
+    link.setAttribute("aria-label", label);
+    link.title = label;
+    link.innerHTML = `<i class="menu-icon fa ${icon}" aria-hidden="true"></i><span class="menu-text">${escapeHTML(label)}</span>`;
+    link.addEventListener("click", event => {
+      event.preventDefault();
+      handler();
+    });
+    item.appendChild(link);
+    return item;
   }
 
   async function openCoordinationDashboard() {
@@ -561,13 +583,7 @@
     }
   }
 
-  function initializeConsultationReview() {
-    if (document.querySelector("#agora-open-consultations")) return;
-    injectStyles();
-    const button = createButton("Avaliação de consultas", "agora-open-consultations", "", openConsultationControl);
-    button.className = "agora-consultation-launcher";
-    document.body.append(button);
-  }
+
 
   function openConsultationControl() {
     if (document.querySelector("#agora-consultations-root")) return;
