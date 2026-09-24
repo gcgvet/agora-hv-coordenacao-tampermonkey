@@ -194,8 +194,6 @@
     });
   }
 
-  async function showHistory
-
   async function showHistory(event) {
     const button = event.currentTarget;
     const card = button.closest("[data-pending-id]");
@@ -259,8 +257,6 @@
     });
     return options.blocking === false ? request() : withLoading(messages[action] || "Processando dados...", request);
   }
-
-  async function withLoading
 
   async function withLoading(message, operation) {
     injectStyles();
