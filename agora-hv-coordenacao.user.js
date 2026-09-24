@@ -31,6 +31,7 @@
   let consultationRecords = [];
   let dashboardPendencies = [];
   let loadingOperations = 0;
+  let backgroundSaveCount = 0;
   let activePanelHistory = null;
 
   if (location.protocol === "file:" && SITE_PAGE.test(location.pathname)) initializeHospitalReview();
@@ -128,7 +129,7 @@
     }
   }
 
-  async function openPatientPendencies() {
+  async function openPatientPendencies(background = false) {
     let patient;
     try {
       patient = currentPatient();
@@ -139,7 +140,7 @@
     const button = document.querySelector("#agora-pending-patient");
     button.disabled = true;
     try {
-      const result = await apiRequest("listPendencias");
+      const result = await apiRequest("listPendencias", {}, { blocking: !background });
       const pendencies = result.pendencias.filter(item => item.pacienteId === patient.pacienteId || (patient.ciplexAnimalId && item.ciplexAnimalId === patient.ciplexAnimalId));
       renderPendencies(patient, pendencies);
     } catch (error) {
@@ -182,16 +183,18 @@
     const status = card.querySelector("[data-status]").value;
     const observation = card.querySelector("[data-observation]").value.trim();
     button.disabled = true;
-    try {
-      await apiRequest("updatePendencia", { pendencia: { id: button.dataset.updatePending, status, observacao: observation, usuario: "Coordenadora" } });
+    runBackgroundSave(() => apiRequest("updatePendencia", { pendencia: {
+      id: button.dataset.updatePending, status, observacao: observation, usuario: "Coordenadora"
+    } }, { blocking: false })).then(() => {
       notify("Pendência atualizada.");
-      document.querySelector(".agora-overlay")?.remove();
-      openPatientPendencies();
-    } catch (error) {
+      openPatientPendencies(true);
+    }).catch(error => {
       notify(error.message, true);
       button.disabled = false;
-    }
+    });
   }
+
+  async function showHistory
 
   async function showHistory(event) {
     const button = event.currentTarget;
@@ -224,7 +227,7 @@
     return overlay;
   }
 
-  function apiRequest(action, payload = {}) {
+  function apiRequest(action, payload = {}, options = {}) {
     const messages = {
       createPendencia: "Registrando pendência...",
       listPendencias: "Carregando pendências...",
@@ -232,7 +235,7 @@
       listHistorico: "Carregando histórico...",
       export: "Preparando exportação..."
     };
-    return withLoading(messages[action] || "Processando dados...", () => new Promise((resolve, reject) => {
+    const request = () => new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "POST",
         url: WEB_APP_URL,
@@ -253,8 +256,11 @@
         ontimeout() { reject(new Error("O Apps Script não respondeu a tempo.")); },
         onerror() { reject(new Error("Não foi possível acessar o Apps Script.")); }
       });
-    }));
+    });
+    return options.blocking === false ? request() : withLoading(messages[action] || "Processando dados...", request);
   }
+
+  async function withLoading
 
   async function withLoading(message, operation) {
     injectStyles();
@@ -333,21 +339,57 @@
   }
 
   function closeCoordinationPanel(restoreHistory = false) {
+    if (backgroundSaveCount > 0) {
+      notify("Aguarde o salvamento terminar antes de sair.", true);
+      return false;
+    }
     const hadPanel = Boolean(document.querySelector("#agora-dashboard-root, #agora-consultations-root"));
     document.querySelectorAll("#agora-dashboard-root, #agora-consultations-root, .agora-overlay").forEach(element => element.remove());
     if (restoreHistory && hadPanel && activePanelHistory) {
       activePanelHistory = null;
       history.back();
     }
+    return true;
   }
 
   function handleCoordinationHistory() {
+    if (backgroundSaveCount > 0) {
+      history.pushState({ ...(history.state || {}), agoraCoordPanel: activePanelHistory || "coordination" }, "", location.href);
+      notify("Aguarde o salvamento terminar antes de sair.", true);
+      return;
+    }
     if (!activePanelHistory) return;
     activePanelHistory = null;
     closeCoordinationPanel();
   }
 
-  window.addEventListener("popstate", handleCoordinationHistory);
+  function updateSavingIndicator() {
+    let indicator = document.querySelector("#agora-saving-indicator");
+    if (backgroundSaveCount > 0) {
+      if (!indicator) {
+        indicator = document.createElement("div");
+        indicator.id = "agora-saving-indicator";
+        indicator.setAttribute("role", "status");
+        indicator.setAttribute("aria-live", "polite");
+        document.body.append(indicator);
+      }
+      indicator.innerHTML = '<span aria-hidden="true"></span> Salvando alterações...';
+      indicator.classList.add("visible");
+    } else if (indicator) {
+      indicator.classList.remove("visible");
+    }
+  }
+
+  function runBackgroundSave(operation) {
+    backgroundSaveCount += 1;
+    updateSavingIndicator();
+    return Promise.resolve().then(operation).finally(() => {
+      backgroundSaveCount = Math.max(0, backgroundSaveCount - 1);
+      updateSavingIndicator();
+    });
+  }
+
+  function createSidebarAction
 
   function createSidebarAction(label, id, icon, handler) {
     const item = document.createElement("li");
