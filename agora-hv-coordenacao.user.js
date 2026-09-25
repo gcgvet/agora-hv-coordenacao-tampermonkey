@@ -40,6 +40,7 @@
     new MutationObserver(() => {
       initializeCoordinationSidebar();
     }).observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener("popstate", handleCoordinationHistory);
   }
 
   function initializeHospitalReview() {
