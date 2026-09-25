@@ -695,10 +695,12 @@
     </main>`;
     document.body.append(root);
     root.querySelector("[data-consultation-close]").addEventListener("click", () => closeCoordinationPanel(true));
-    root.querySelector("[data-consultation-fetch]").addEventListener("click", fetchConsultations);
+    const fetchButton = root.querySelector("[data-consultation-fetch]");
+    fetchButton.addEventListener("click", fetchConsultations);
     root.querySelector("[data-consultation-copy]").addEventListener("click", copyVeterinarianReport);
     root.querySelector("[data-consultation-export]").addEventListener("click", exportConsultationsXls);
     renderConsultations();
+    fetchConsultations({ currentTarget: fetchButton });
   }
 
   async function fetchConsultations(event) {
