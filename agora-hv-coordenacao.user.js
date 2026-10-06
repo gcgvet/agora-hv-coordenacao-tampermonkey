@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.7-test
+// @version      0.5.8-test
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -30,6 +30,9 @@
   const SITE_PAGE = /\/(?:index\.html)?$/i;
   let consultationRecords = [];
   let dashboardPendencies = [];
+  let dashboardHistoryCache = null;
+  let dashboardHistoryRequest = null;
+  let dashboardHistoryGeneration = 0;
   let dashboardSort = { key: null, direction: 1 };
   let loadingOperations = 0;
   let backgroundSaveCount = 0;
@@ -206,7 +209,10 @@
     }
     button.disabled = true;
     try {
-      const result = await apiRequest("listHistorico", { pendenciaId: button.dataset.historyPending });
+      const pendingId = button.dataset.historyPending;
+      const result = card.closest(".agora-overlay[data-dashboard-pending]")
+        ? { historico: (await loadDashboardHistory()).filter(item => String(item.pendenciaId) === pendingId) }
+        : await apiRequest("listHistorico", { pendenciaId: pendingId });
       container.innerHTML = result.historico.length ? result.historico.map(item => `<div><b>${escapeHTML(formatDateTime(item.data))}</b> ${escapeHTML(item.acao)}${item.statusNovo ? ` · ${escapeHTML(item.statusNovo)}` : ""}${item.observacao ? `<p>${escapeHTML(item.observacao)}</p>` : ""}</div>`).join("") : "<div>Sem histórico.</div>";
       container.hidden = false;
     } catch (error) {
@@ -444,6 +450,8 @@
     if (!root) return;
     const refresh = root.querySelector("[data-dashboard-refresh]");
     refresh.disabled = true;
+    invalidateDashboardHistory();
+    loadDashboardHistory().catch(() => {});
     try {
       const result = await apiRequest("listPendencias", {}, { blocking: !background });
       dashboardPendencies = result.pendencias;
@@ -454,6 +462,27 @@
     } finally {
       refresh.disabled = false;
     }
+  }
+
+  function invalidateDashboardHistory() {
+    dashboardHistoryGeneration += 1;
+    dashboardHistoryCache = null;
+    dashboardHistoryRequest = null;
+  }
+
+  function loadDashboardHistory() {
+    if (dashboardHistoryCache !== null) return Promise.resolve(dashboardHistoryCache);
+    if (dashboardHistoryRequest) return dashboardHistoryRequest;
+    const generation = dashboardHistoryGeneration;
+    const request = apiRequest("listHistorico", {}, { blocking: false }).then(result => {
+      if (generation !== dashboardHistoryGeneration) return loadDashboardHistory();
+      dashboardHistoryCache = result.historico;
+      return dashboardHistoryCache;
+    }).finally(() => {
+      if (dashboardHistoryRequest === request) dashboardHistoryRequest = null;
+    });
+    dashboardHistoryRequest = request;
+    return request;
   }
 
   function updateDashboardVeterinarians() {
@@ -643,8 +672,8 @@
       historyButton.disabled = true;
       textarea.value = "Carregando histórico...";
       try {
-        const result = await apiRequest("listHistorico");
-        historyText = dashboardHistoryReportText(items, result.historico);
+        const history = await loadDashboardHistory();
+        historyText = dashboardHistoryReportText(items, history);
         if (reportMode === "history") textarea.value = historyText;
       } catch (error) {
         if (reportMode === "history") {
