@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.6-test
+// @version      0.5.7-test
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -350,6 +350,10 @@
     return true;
   }
 
+  function switchCoordinationPanel(openPanel) {
+    if (closeCoordinationPanel()) openPanel();
+  }
+
   function handleCoordinationHistory() {
     if (backgroundSaveCount > 0) {
       history.pushState({ ...(history.state || {}), agoraCoordPanel: activePanelHistory || "coordination" }, "", location.href);
@@ -411,7 +415,7 @@
     const root = document.createElement("section");
     root.id = "agora-dashboard-root";
     root.innerHTML = `<main class="agora-dashboard-page">
-      <header><div><h1>Painel da coordenação</h1><p>Pendências de consultas e internações em um único acompanhamento.</p></div><button type="button" data-dashboard-close>Fechar</button></header>
+      <header><div><h1>Painel da coordenação</h1><p>Pendências de consultas e internações em um único acompanhamento.</p></div><div class="agora-panel-navigation"><button type="button" data-dashboard-consultations>Revisão de consultas</button><button type="button" data-dashboard-close>Fechar</button></div></header>
       <div class="agora-dashboard-filters">
         <label>Buscar<input data-dashboard-search placeholder="Paciente, tutor, veterinário ou descrição"></label>
         <label>Status<select data-dashboard-status><option value="active">Todos ativos</option>${STATUSES.map(item => `<option>${escapeHTML(item)}</option>`).join("")}<option value="all">Todos (inclui Encerradas)</option></select></label>
@@ -425,6 +429,7 @@
       <div class="agora-dashboard-list" data-dashboard-list><p>Carregando pendências...</p></div>
     </main>`;
     document.body.append(root);
+    root.querySelector("[data-dashboard-consultations]").addEventListener("click", () => switchCoordinationPanel(openConsultationControl));
     root.querySelector("[data-dashboard-close]").addEventListener("click", () => closeCoordinationPanel(true));
     root.querySelectorAll(".agora-dashboard-filters input,.agora-dashboard-filters select").forEach(control => control.addEventListener("input", renderDashboard));
     root.querySelector("[data-dashboard-refresh]").addEventListener("click", loadDashboardPendencies);
@@ -526,14 +531,24 @@
     return dashboardSort.direction * (typeof a === "number" ? a - b : String(a).localeCompare(String(b), "pt-BR", { sensitivity: "base", numeric: true }));
   }
 
+
+  function pendencyNameLink(name, item, animal) {
+    const ids = extractCiplexIds([item.clienteUrl, item.animalUrl].filter(Boolean).join(" "));
+    const clientId = String(item.ciplexClienteId || item.clienteId || ids.clienteId || "");
+    const animalId = String(item.ciplexAnimalId || ids.pacienteId || "");
+    const clientUrl = /^\d+$/.test(clientId) ? `https://ciplexsistemas.com/sistema/exibir#clientes/exibir/${clientId}` : "";
+    const url = animal ? clientUrl && /^\d+$/.test(animalId) ? `${clientUrl}&Animal.editar=${animalId}` : safeCiplexUrl(item.animalUrl || "") : clientUrl || safeCiplexUrl(item.clienteUrl || "");
+    return consultationName(name, url);
+  }
+
   function dashboardPendingRow(item) {
     const statusClass = ["open", "communicated", "regularizing", "resolved", "closed"][STATUSES.indexOf(item.status)] || "open";
     const date = pendingDate(item);
     return `<tr class="${isOverdue(item) ? "agora-dashboard-overdue" : ""}">
       <td>${escapeHTML(date ? formatDate(date) : "—")}</td>
       <td>${escapeHTML(item.veterinario || "Não informado")}</td>
-      <td>${escapeHTML(item.paciente || "Não informado")}</td>
-      <td>${escapeHTML(item.tutor || "Não informado")}</td>
+      <td>${pendencyNameLink(item.paciente || "Não informado", item, true)}</td>
+      <td>${pendencyNameLink(item.tutor || "Não informado", item, false)}</td>
       <td><i class="agora-origin ${pendencyOrigin(item) === "Internação" ? "hospital" : "consultation"}">${escapeHTML(pendencyOrigin(item))}</i></td>
       <td class="agora-dashboard-description">${escapeHTML(item.categoria ? item.categoria + ": " : "")}${escapeHTML(item.descricao)}${isOverdue(item) ? '<small class="agora-dashboard-warning">Vencida</small>' : ""}${item.reincidente === true || item.reincidente === "true" ? '<small class="agora-dashboard-warning recurrent">Reincidente</small>' : ""}</td>
       <td><button type="button" class="agora-status-button ${statusClass}" data-open-pending="${escapeHTML(item.id)}" aria-label="${escapeHTML("Editar pendência de " + (item.paciente || "paciente") + ": " + item.status)}">${escapeHTML(item.status)}</button></td>
@@ -677,11 +692,11 @@
   function groupedDashboardReport(items, title, renderPending) {
     const veterinarians = groupBy(items, item => item.veterinario || "Não informado");
     const sections = [...veterinarians.entries()].sort(([first], [second]) => first.localeCompare(second, "pt-BR")).map(([veterinarian, records]) => {
-      const patients = groupBy(records, item => item.ciplexAnimalId || item.pacienteId || `${normalizeText(item.paciente)}|${normalizeText(item.tutor)}`);
+      const patients = groupBy(records, item => `${item.ciplexAnimalId || item.pacienteId || `${normalizeText(item.paciente)}|${normalizeText(item.tutor)}`}|${formatDate(pendingDate(item))}`);
       const patientSections = [...patients.values()].sort((first, second) => String(first[0].paciente || "").localeCompare(String(second[0].paciente || ""), "pt-BR")).map(patientRecords => {
         const patient = patientRecords[0];
         const identifier = patient.ciplexAnimalId || "sem ID Ciplex";
-        const lines = [`- ${patient.paciente || "Paciente não informado"} - ${identifier} - ${patient.tutor || "Tutor não informado"}:`];
+        const lines = [`- ${patient.paciente || "Paciente não informado"} - ${identifier} - ${patient.tutor || "Tutor não informado"} - Abertura: ${pendingDate(patient) ? formatDate(pendingDate(patient)) : "não informada"}:`];
         const origins = groupBy(patientRecords, pendencyOrigin);
         ["Internação", "Consulta"].forEach(origin => {
           const pending = origins.get(origin);
@@ -742,7 +757,7 @@
     const root = document.createElement("section");
     root.id = "agora-consultations-root";
     root.innerHTML = `<main class="agora-consultation-page">
-      <header><div><h1>Avaliação de consultas</h1><p>Completude, suficiência, coerência e documentação integradas às pendências operacionais.</p></div><button type="button" data-consultation-close>Fechar</button></header>
+      <header><div><h1>Avaliação de consultas</h1><p>Completude, suficiência, coerência e documentação integradas às pendências operacionais.</p></div><div class="agora-panel-navigation"><button type="button" data-consultation-dashboard>Painel da coordenação</button><button type="button" data-consultation-close>Fechar</button></div></header>
       <div class="agora-consultation-toolbar">
         <label>Data inicial<input type="date" data-consultation-start value="${today}"></label>
         <label>Data final<input type="date" data-consultation-end value="${today}"></label>
@@ -754,6 +769,7 @@
       <div class="agora-consultation-table"><table><thead><tr><th>Cliente</th><th>Animal</th><th>Data</th><th>Médico Veterinário</th><th>Avaliação</th></tr></thead><tbody></tbody></table></div>
     </main>`;
     document.body.append(root);
+    root.querySelector("[data-consultation-dashboard]").addEventListener("click", () => switchCoordinationPanel(openCoordinationDashboard));
     root.querySelector("[data-consultation-close]").addEventListener("click", () => closeCoordinationPanel(true));
     const fetchButton = root.querySelector("[data-consultation-fetch]");
     fetchButton.addEventListener("click", fetchConsultations);
@@ -840,7 +856,7 @@
   }
 
   function consultationName(name, url) {
-    return `<div class="agora-consultation-name"><span>${escapeHTML(name)}</span>${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">Abrir ↗</a>` : ""}</div>`;
+    return `<div class="agora-consultation-name">${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">${escapeHTML(name)}</a>` : `<span>${escapeHTML(name)}</span>`}</div>`;
   }
 
   function openConsultationReview(event) {
@@ -900,6 +916,10 @@
             id: existing?.id,
             origemRegistro: originId,
             ciplexAnimalId: record.pacienteId,
+            ciplexClienteId: record.clienteId,
+            clienteId: record.clienteId,
+            clienteUrl: record.clienteUrl,
+            animalUrl: record.animalUrl,
             paciente: record.animal,
             tutor: record.cliente,
             veterinario: record.veterinario,
@@ -987,6 +1007,7 @@
   }
 
   function safeCiplexUrl(value) {
+    if (!value) return "";
     try {
       const url = new URL(value, "https://ciplexsistemas.com");
       return url.origin === "https://ciplexsistemas.com" ? url.href : "";
@@ -1025,6 +1046,7 @@
       @keyframes agora-loading-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){#agora-loading-overlay{transition:none}#agora-loading-overlay i{animation-duration:1.5s}}
     `;
     style.textContent += "\n      .agora-dashboard-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-dashboard-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-dashboard-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-dashboard-table td{padding:9px;border-bottom:1px solid #dbe1de;vertical-align:top}.agora-dashboard-table th button{border:0;background:transparent;color:inherit;padding:0;text-align:left;font:inherit;font-weight:700;white-space:nowrap}.agora-dashboard-table th button:focus-visible{outline:2px solid #c0f6ff;outline-offset:4px}.agora-dashboard-description{min-width:240px;white-space:pre-wrap;overflow-wrap:anywhere}.agora-dashboard-overdue td{background:#fff7f5}.agora-dashboard-overdue td:first-child{box-shadow:inset 4px 0 #b3392b}.agora-dashboard-warning{display:block;margin-top:4px;color:#9d3028;font-size:11px;font-weight:700}.agora-dashboard-warning.recurrent{color:#795600}.agora-dashboard-table .agora-status-button{border:0;border-radius:999px;padding:6px 10px;font-size:11px;white-space:nowrap}.agora-status-button.open{background:#fff1cf;color:#795600}.agora-status-button.communicated{background:#dbe9f5;color:#245a83}.agora-status-button.regularizing{background:#eee1f5;color:#6b3886}.agora-status-button.resolved{background:#dcefe9;color:#0b4a3f}.agora-status-button.closed{background:#e7e9e8;color:#52615b}\n";
+    style.textContent += ".agora-modal select{height:auto;min-height:40px;line-height:1.4;padding:9px 30px 9px 9px}.agora-panel-navigation{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.agora-dashboard-table .agora-consultation-name a{color:#0b594a;font-weight:700}";
     document.head.append(style);
   }
 })();
