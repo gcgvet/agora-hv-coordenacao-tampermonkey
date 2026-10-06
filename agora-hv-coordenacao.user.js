@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.8-test
+// @version      0.5.9-test
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -30,6 +30,7 @@
   const SITE_PAGE = /\/(?:index\.html)?$/i;
   let consultationRecords = [];
   let dashboardPendencies = [];
+  const ciplexPatientClients = new Map();
   let dashboardHistoryCache = null;
   let dashboardHistoryRequest = null;
   let dashboardHistoryGeneration = 0;
@@ -455,8 +456,10 @@
     try {
       const result = await apiRequest("listPendencias", {}, { blocking: !background });
       dashboardPendencies = result.pendencias;
+      rememberConsultationLinks(consultationRecords);
       updateDashboardVeterinarians();
       renderDashboard();
+      hydrateDashboardLinks().catch(error => notify("Não foi possível carregar os links do Ciplex: " + error.message, true));
     } catch (error) {
       notify(error.message, true);
     } finally {
@@ -561,10 +564,36 @@
   }
 
 
+
+  function rememberConsultationLinks(records) {
+    records.forEach(record => {
+      if (/^\d+$/.test(String(record.pacienteId)) && /^\d+$/.test(String(record.clienteId))) {
+        ciplexPatientClients.set(String(record.pacienteId), String(record.clienteId));
+      }
+    });
+  }
+
+  async function hydrateDashboardLinks() {
+    const missing = dashboardPendencies.filter(item => item.ciplexAnimalId && !item.ciplexClienteId && !item.clienteId && !item.clienteUrl && !item.animalUrl && !ciplexPatientClients.has(String(item.ciplexAnimalId)));
+    if (!missing.length || location.origin !== "https://ciplexsistemas.com") return;
+    const dates = missing.map(pendingDate).map(value => String(value).slice(0, 10)).filter(value => /^\d{4}-\d{2}-\d{2}$/.test(value) && value <= todayISO()).sort();
+    // Older records without an opening date are searched in the last 90 days.
+    const fallback = new Date();
+    fallback.setDate(fallback.getDate() - 90);
+    const fallbackISO = `${fallback.getFullYear()}-${String(fallback.getMonth() + 1).padStart(2, "0")}-${String(fallback.getDate()).padStart(2, "0")}`;
+    const start = dates.length ? dates[0] : fallbackISO;
+    const period = `${isoToBrazilian(start)} - ${isoToBrazilian(todayISO())}`;
+    const endpoint = `/sistema/relatorios_atendimento/exibir_atendimentos_realizados?${new URLSearchParams({ "data[periodo]": period })}`;
+    const response = await fetch(endpoint, { credentials: "include", headers: { "X-Requested-With": "XMLHttpRequest" } });
+    if (!response.ok) throw new Error(`O Ciplex respondeu com o código ${response.status}.`);
+    rememberConsultationLinks(extractConsultations(await response.text()));
+    renderDashboard();
+  }
+
   function pendencyNameLink(name, item, animal) {
     const ids = extractCiplexIds([item.clienteUrl, item.animalUrl].filter(Boolean).join(" "));
-    const clientId = String(item.ciplexClienteId || item.clienteId || ids.clienteId || "");
     const animalId = String(item.ciplexAnimalId || ids.pacienteId || "");
+    const clientId = String(item.ciplexClienteId || item.clienteId || ids.clienteId || ciplexPatientClients.get(animalId) || "");
     const clientUrl = /^\d+$/.test(clientId) ? `https://ciplexsistemas.com/sistema/exibir#clientes/exibir/${clientId}` : "";
     const url = animal ? clientUrl && /^\d+$/.test(animalId) ? `${clientUrl}&Animal.editar=${animalId}` : safeCiplexUrl(item.animalUrl || "") : clientUrl || safeCiplexUrl(item.clienteUrl || "");
     return consultationName(name, url);
@@ -827,6 +856,7 @@
       });
       if (/login|entrar no sistema/i.test(text) && !/<table/i.test(text)) throw new Error("A sessão do Ciplex parece ter expirado.");
       consultationRecords = extractConsultations(text);
+      rememberConsultationLinks(consultationRecords);
       renderConsultations();
       notify(`${consultationRecords.length} consulta${consultationRecords.length === 1 ? "" : "s"} carregada${consultationRecords.length === 1 ? "" : "s"}.`);
     } catch (error) {
@@ -1076,6 +1106,7 @@
     `;
     style.textContent += "\n      .agora-dashboard-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-dashboard-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-dashboard-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-dashboard-table td{padding:9px;border-bottom:1px solid #dbe1de;vertical-align:top}.agora-dashboard-table th button{border:0;background:transparent;color:inherit;padding:0;text-align:left;font:inherit;font-weight:700;white-space:nowrap}.agora-dashboard-table th button:focus-visible{outline:2px solid #c0f6ff;outline-offset:4px}.agora-dashboard-description{min-width:240px;white-space:pre-wrap;overflow-wrap:anywhere}.agora-dashboard-overdue td{background:#fff7f5}.agora-dashboard-overdue td:first-child{box-shadow:inset 4px 0 #b3392b}.agora-dashboard-warning{display:block;margin-top:4px;color:#9d3028;font-size:11px;font-weight:700}.agora-dashboard-warning.recurrent{color:#795600}.agora-dashboard-table .agora-status-button{border:0;border-radius:999px;padding:6px 10px;font-size:11px;white-space:nowrap}.agora-status-button.open{background:#fff1cf;color:#795600}.agora-status-button.communicated{background:#dbe9f5;color:#245a83}.agora-status-button.regularizing{background:#eee1f5;color:#6b3886}.agora-status-button.resolved{background:#dcefe9;color:#0b4a3f}.agora-status-button.closed{background:#e7e9e8;color:#52615b}\n";
     style.textContent += ".agora-modal select{height:auto;min-height:40px;line-height:1.4;padding:9px 30px 9px 9px}.agora-panel-navigation{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.agora-dashboard-table .agora-consultation-name a{color:#0b594a;font-weight:700}";
+    style.textContent += "#agora-consultations-root{background:#f2f0e9;color:#21352f}.agora-consultation-page{max-width:1450px}.agora-consultation-page>header{margin-bottom:18px}.agora-consultation-page button{border:1px solid #9baba5;border-radius:7px;padding:9px 12px;background:#fff;color:#21352f;font-weight:700}.agora-consultation-toolbar{gap:9px;padding:14px;margin:12px 0 18px;background:#fff;border:1px solid #d1d9d5;border-radius:9px}.agora-consultation-toolbar label{font-size:11px;text-transform:uppercase}.agora-consultation-toolbar input,.agora-consultation-toolbar select{border-color:#bac7c2}.agora-consultation-page button.agora-primary{background:#0b594a;color:#fff;border-color:#0b594a}@media(max-width:650px){.agora-consultation-page{padding:12px}.agora-consultation-toolbar [data-consultation-veterinarian]{min-width:0;max-width:100%}}";
     document.head.append(style);
   }
 })();
