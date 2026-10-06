@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.5
+// @version      0.5.12
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -11,8 +11,8 @@
 // @grant        GM_setClipboard
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
-// @updateURL    https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/sidebar-coordenacao/agora-hv-coordenacao.user.js
-// @downloadURL  https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/sidebar-coordenacao/agora-hv-coordenacao.user.js
+// @updateURL    https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-hv-coordenacao.user.js
+// @downloadURL  https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-hv-coordenacao.user.js
 // ==/UserScript==
 
 (function () {
@@ -30,6 +30,13 @@
   const SITE_PAGE = /\/(?:index\.html)?$/i;
   let consultationRecords = [];
   let dashboardPendencies = [];
+  const ciplexPatientClients = new Map();
+  const ciplexNamesLinks = new Map();
+  const ciplexLookupRequests = new Map();
+  let dashboardHistoryCache = null;
+  let dashboardHistoryRequest = null;
+  let dashboardHistoryGeneration = 0;
+  let dashboardSort = { key: null, direction: 1 };
   let loadingOperations = 0;
   let backgroundSaveCount = 0;
   let activePanelHistory = null;
@@ -205,7 +212,10 @@
     }
     button.disabled = true;
     try {
-      const result = await apiRequest("listHistorico", { pendenciaId: button.dataset.historyPending });
+      const pendingId = button.dataset.historyPending;
+      const result = card.closest(".agora-overlay[data-dashboard-pending]")
+        ? { historico: (await loadDashboardHistory()).filter(item => String(item.pendenciaId) === pendingId) }
+        : await apiRequest("listHistorico", { pendenciaId: pendingId });
       container.innerHTML = result.historico.length ? result.historico.map(item => `<div><b>${escapeHTML(formatDateTime(item.data))}</b> ${escapeHTML(item.acao)}${item.statusNovo ? ` · ${escapeHTML(item.statusNovo)}` : ""}${item.observacao ? `<p>${escapeHTML(item.observacao)}</p>` : ""}</div>`).join("") : "<div>Sem histórico.</div>";
       container.hidden = false;
     } catch (error) {
@@ -240,7 +250,7 @@
         url: WEB_APP_URL,
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         data: JSON.stringify({ action, ...payload }),
-        timeout: 20000,
+        timeout: options.timeout || 20000,
         onload(response) {
           let result;
           try {
@@ -252,7 +262,7 @@
           if (response.status < 200 || response.status >= 300 || !result.ok) reject(new Error(result.error || "Não foi possível concluir a operação."));
           else resolve(result);
         },
-        ontimeout() { reject(new Error("O Apps Script não respondeu a tempo.")); },
+        ontimeout() { const error = new Error("O Apps Script não respondeu a tempo."); error.code = "TIMEOUT"; reject(error); },
         onerror() { reject(new Error("Não foi possível acessar o Apps Script.")); }
       });
     });
@@ -349,6 +359,10 @@
     return true;
   }
 
+  function switchCoordinationPanel(openPanel) {
+    if (closeCoordinationPanel()) openPanel();
+  }
+
   function handleCoordinationHistory() {
     if (backgroundSaveCount > 0) {
       history.pushState({ ...(history.state || {}), agoraCoordPanel: activePanelHistory || "coordination" }, "", location.href);
@@ -410,7 +424,7 @@
     const root = document.createElement("section");
     root.id = "agora-dashboard-root";
     root.innerHTML = `<main class="agora-dashboard-page">
-      <header><div><h1>Painel da coordenação</h1><p>Pendências de consultas e internações em um único acompanhamento.</p></div><button type="button" data-dashboard-close>Fechar</button></header>
+      <header><div><h1>Painel da coordenação</h1><p>Pendências de consultas e internações em um único acompanhamento.</p></div><div class="agora-panel-navigation"><button type="button" data-dashboard-consultations>Revisão de consultas</button><button type="button" data-dashboard-close>Fechar</button></div></header>
       <div class="agora-dashboard-filters">
         <label>Buscar<input data-dashboard-search placeholder="Paciente, tutor, veterinário ou descrição"></label>
         <label>Status<select data-dashboard-status><option value="active">Todos ativos</option>${STATUSES.map(item => `<option>${escapeHTML(item)}</option>`).join("")}<option value="all">Todos (inclui Encerradas)</option></select></label>
@@ -419,14 +433,16 @@
         <label>Veterinário<select data-dashboard-veterinarian><option value="">Todos</option></select></label>
         <label>Destaque<select data-dashboard-highlight><option value="">Todos</option><option value="overdue">Vencidas</option><option value="recurrent">Reincidentes</option></select></label>
       </div>
-      <div class="agora-dashboard-actions"><button type="button" data-dashboard-report>Relatório</button><button type="button" data-dashboard-csv>Exportar CSV</button><button type="button" class="agora-primary" data-dashboard-save-all>Salvar todas</button><button type="button" class="agora-primary" data-dashboard-refresh>Atualizar</button></div>
+      <div class="agora-dashboard-actions"><button type="button" data-dashboard-complete-links>Completar links</button><button type="button" data-dashboard-report>Relatório</button><button type="button" data-dashboard-csv>Exportar CSV</button><button type="button" class="agora-primary" data-dashboard-save-all>Salvar todas</button><button type="button" class="agora-primary" data-dashboard-refresh>Atualizar</button></div>
       <div class="agora-indicators" data-dashboard-indicators></div>
       <div class="agora-dashboard-list" data-dashboard-list><p>Carregando pendências...</p></div>
     </main>`;
     document.body.append(root);
+    root.querySelector("[data-dashboard-consultations]").addEventListener("click", () => switchCoordinationPanel(openConsultationControl));
     root.querySelector("[data-dashboard-close]").addEventListener("click", () => closeCoordinationPanel(true));
     root.querySelectorAll(".agora-dashboard-filters input,.agora-dashboard-filters select").forEach(control => control.addEventListener("input", renderDashboard));
     root.querySelector("[data-dashboard-refresh]").addEventListener("click", loadDashboardPendencies);
+    root.querySelector("[data-dashboard-complete-links]").addEventListener("click", completeDashboardLinks);
     root.querySelector("[data-dashboard-report]").addEventListener("click", openDashboardReport);
     root.querySelector("[data-dashboard-csv]").addEventListener("click", () => exportOperationalData("csv"));
     root.querySelector("[data-dashboard-save-all]").addEventListener("click", saveAllDashboardPending);
@@ -438,16 +454,41 @@
     if (!root) return;
     const refresh = root.querySelector("[data-dashboard-refresh]");
     refresh.disabled = true;
+    invalidateDashboardHistory();
+    loadDashboardHistory().catch(() => {});
     try {
       const result = await apiRequest("listPendencias", {}, { blocking: !background });
       dashboardPendencies = result.pendencias;
+      rememberConsultationLinks(consultationRecords);
       updateDashboardVeterinarians();
       renderDashboard();
+      hydrateDashboardLinks().catch(error => notify("Não foi possível carregar os links do Ciplex: " + error.message, true));
     } catch (error) {
       notify(error.message, true);
     } finally {
       refresh.disabled = false;
     }
+  }
+
+  function invalidateDashboardHistory() {
+    dashboardHistoryGeneration += 1;
+    dashboardHistoryCache = null;
+    dashboardHistoryRequest = null;
+  }
+
+  function loadDashboardHistory() {
+    if (dashboardHistoryCache !== null) return Promise.resolve(dashboardHistoryCache);
+    if (dashboardHistoryRequest) return dashboardHistoryRequest;
+    const generation = dashboardHistoryGeneration;
+    const request = apiRequest("listHistorico", {}, { blocking: false }).then(result => {
+      if (generation !== dashboardHistoryGeneration) return loadDashboardHistory();
+      dashboardHistoryCache = result.historico;
+      return dashboardHistoryCache;
+    }).finally(() => {
+      if (dashboardHistoryRequest === request) dashboardHistoryRequest = null;
+    });
+    dashboardHistoryRequest = request;
+    return request;
   }
 
   function updateDashboardVeterinarians() {
@@ -476,7 +517,7 @@
         && (!origin || pendencyOrigin(item) === origin)
         && (!veterinarian || item.veterinario === veterinarian)
         && (!highlight || highlight === "overdue" && isOverdue(item) || highlight === "recurrent" && (item.reincidente === true || item.reincidente === "true"));
-    }).sort((first, second) => Number(isOverdue(second)) - Number(isOverdue(first)) || String(first.prazo || "9999").localeCompare(String(second.prazo || "9999")));
+    }).sort(compareDashboardPendencies);
   }
 
   function renderDashboard() {
@@ -488,9 +529,192 @@
     const recurrent = items.filter(item => item.reincidente === true || item.reincidente === "true").length;
     root.querySelector("[data-dashboard-indicators]").innerHTML = `<span><b>${items.length}</b>Exibidas</span><span><b>${active}</b>Em andamento</span><span class="${overdue ? "danger" : ""}"><b>${overdue}</b>Vencidas</span><span><b>${recurrent}</b>Reincidentes</span>`;
     const list = root.querySelector("[data-dashboard-list]");
-    list.innerHTML = items.length ? items.map(pendingCard).join("") : "<p>Nenhuma pendência corresponde aos filtros.</p>";
-    list.querySelectorAll("[data-update-pending]").forEach(button => button.addEventListener("click", updateDashboardPending));
-    list.querySelectorAll("[data-history-pending]").forEach(button => button.addEventListener("click", showHistory));
+    const columns = [["date", "Data"], ["veterinario", "Veterinário"], ["paciente", "Animal"], ["tutor", "Cliente"], ["origin", "Origem"], [null, "Pendência"], ["status", "Status"]];
+    list.innerHTML = `<div class="agora-dashboard-table"><table><thead><tr>${columns.map(([key, label]) => {
+      const selected = dashboardSort.key === key && key;
+      return `<th${key ? ` aria-sort="${selected ? dashboardSort.direction === 1 ? "ascending" : "descending" : "none"}"` : ""}>${key ? `<button type="button" data-dashboard-sort="${key}">${label}<span aria-hidden="true">${selected ? dashboardSort.direction === 1 ? " ▲" : " ▼" : " ↕"}</span></button>` : label}</th>`;
+    }).join("")}</tr></thead><tbody>${items.length ? items.map(dashboardPendingRow).join("") : '<tr><td colspan="7" class="agora-consultation-empty">Nenhuma pendência corresponde aos filtros.</td></tr>'}</tbody></table></div>`;
+    list.querySelectorAll("[data-dashboard-sort]").forEach(button => button.addEventListener("click", () => {
+      const key = button.dataset.dashboardSort;
+      dashboardSort = { key, direction: dashboardSort.key === key ? -dashboardSort.direction : 1 };
+      renderDashboard();
+    }));
+    list.querySelectorAll("[data-open-pending]").forEach(button => button.addEventListener("click", openDashboardPending));
+  }
+
+  function pendingDate(item) {
+    return item.criadoEm || item.criadaEm || item.dataCriacao || item.data || "";
+  }
+
+  function dashboardSortValue(item, key) {
+    if (key === "date") {
+      const value = pendingDate(item);
+      const brazilian = String(value).match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+      const timestamp = new Date(brazilian ? `${brazilian[3]}-${brazilian[2]}-${brazilian[1]}` : value).getTime();
+      return Number.isNaN(timestamp) ? null : timestamp;
+    }
+    if (key === "origin") return pendencyOrigin(item);
+    return item[key] || "";
+  }
+
+  function compareDashboardPendencies(first, second) {
+    if (!dashboardSort.key) return Number(isOverdue(second)) - Number(isOverdue(first)) || String(first.prazo || "9999").localeCompare(String(second.prazo || "9999"));
+    const a = dashboardSortValue(first, dashboardSort.key);
+    const b = dashboardSortValue(second, dashboardSort.key);
+    if (a === null || a === "") return b === null || b === "" ? 0 : 1;
+    if (b === null || b === "") return -1;
+    return dashboardSort.direction * (typeof a === "number" ? a - b : String(a).localeCompare(String(b), "pt-BR", { sensitivity: "base", numeric: true }));
+  }
+
+
+
+  function rememberConsultationLinks(records) {
+    records.forEach(record => {
+      if (/^\d+$/.test(String(record.pacienteId)) && /^\d+$/.test(String(record.clienteId))) {
+        ciplexPatientClients.set(String(record.pacienteId), String(record.clienteId));
+        const key = `${normalizeText(record.animal)}|${normalizeText(record.cliente)}`;
+        const links = ciplexNamesLinks.get(key) || new Map();
+        links.set(`${record.pacienteId}|${record.clienteId}`, { animalId: String(record.pacienteId), clientId: String(record.clienteId) });
+        ciplexNamesLinks.set(key, links);
+      }
+    });
+  }
+
+  function clientIdFromSearch(html, animalId) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const candidates = new Set();
+    const exact = new Set();
+    doc.querySelectorAll("a[href]").forEach(link => {
+      const url = safeCiplexUrl(link.getAttribute("href"));
+      if (!url) return;
+      const ids = extractCiplexIds(url);
+      if (!ids.clienteId) return;
+      if (ids.pacienteId && ids.pacienteId !== String(animalId)) return;
+      candidates.add(ids.clienteId);
+      if (ids.pacienteId === String(animalId)) exact.add(ids.clienteId);
+    });
+    if (exact.size === 1) return [...exact][0];
+    if (!exact.size && candidates.size === 1) return [...candidates][0];
+    throw new Error(candidates.size ? "A busca retornou mais de um cliente possível." : "Nenhum link de cliente encontrado na resposta do Ciplex.");
+  }
+
+  function lookupCiplexClient(animalId) {
+    animalId = String(animalId);
+    if (!/^\d+$/.test(animalId)) return Promise.reject(new Error("ID do animal inválido."));
+    if (ciplexPatientClients.has(animalId)) return Promise.resolve(ciplexPatientClients.get(animalId));
+    if (ciplexLookupRequests.has(animalId)) return ciplexLookupRequests.get(animalId);
+    const request = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const query = new URLSearchParams({ pagina: "1", pesquisa: animalId, campo: "idAnimal" });
+        const response = await fetch("/sistema/clientes/listar?" + query, { credentials: "include", headers: { "X-Requested-With": "XMLHttpRequest" }, signal: controller.signal });
+        if (!response.ok) throw new Error("Falha na busca Ciplex: " + response.status);
+        const clientId = clientIdFromSearch(await response.text(), animalId);
+        ciplexPatientClients.set(animalId, clientId);
+        return clientId;
+      } finally { clearTimeout(timeout); }
+    })().finally(() => ciplexLookupRequests.delete(animalId));
+    ciplexLookupRequests.set(animalId, request);
+    return request;
+  }
+
+  async function hydrateDashboardLinks() {
+    if (location.origin !== "https://ciplexsistemas.com") return;
+    const animals = [...new Set(dashboardPendencies.map(pendencyCiplexIds).filter(ids => ids.animalId && !ids.clientId).map(ids => ids.animalId))];
+    for (const animalId of animals) {
+      if (!document.querySelector("#agora-dashboard-root")) break;
+      try { await lookupCiplexClient(animalId); } catch { continue; }
+      renderDashboard();
+    }
+  }
+
+  async function completeDashboardLinks(event) {
+    const button = event.currentTarget;
+    if (button.disabled) return;
+    if (location.origin !== "https://ciplexsistemas.com") return notify("Abra o painel dentro do Ciplex para completar os links.", true);
+    button.disabled = true;
+    let items = [];
+    let unattempted = 0;
+    let timedOut = false;
+    let saved = 0;
+    const failures = [];
+    try {
+      await runBackgroundSave(async () => {
+        const health = await apiRequest("health", {}, { blocking: false });
+        if (!health.clientLinks) throw new Error("Atualize primeiro a implantação do Apps Script com suporte ao ID do cliente.");
+        button.textContent = "Conferindo vínculos salvos...";
+        const current = await apiRequest("listPendencias", {}, { blocking: false, timeout: 120000 });
+        dashboardPendencies = current.pendencias;
+        items = dashboardPendencies.filter(item => !item.ciplexClienteId);
+        for (const item of items) {
+          button.textContent = `Completando ${saved + failures.length + 1}/${items.length}...`;
+          try {
+            const { animalId } = pendencyCiplexIds(item);
+            if (!animalId) throw new Error("ID do animal ausente.");
+            const clientId = await lookupCiplexClient(animalId);
+            const result = await apiRequest("linkPendenciaCliente", { pendencia: { id: item.id, ciplexAnimalId: animalId, ciplexClienteId: clientId, usuario: "Coordenadora" } }, { blocking: false, timeout: 120000 });
+            if (String(result.pendencia?.ciplexClienteId || "") !== clientId) throw new Error("O serviço não confirmou a gravação.");
+            item.ciplexClienteId = clientId;
+            saved += 1;
+          } catch (error) {
+            failures.push(`${item.codigo || item.paciente || item.id}: ${error.message}`);
+            if (error.code === "TIMEOUT") {
+              timedOut = true;
+              unattempted = items.length - saved - failures.length;
+              break;
+            }
+          }
+        }
+      });
+      renderDashboard();
+      invalidateDashboardHistory();
+      if (!timedOut) loadDashboardHistory().catch(() => {});
+      const overlay = createOverlay("Resultado — completar links", true);
+      overlay.querySelector(".agora-modal-body").innerHTML = `<p>Gravações confirmadas nesta execução: ${saved}. Sem confirmação ou com erro: ${failures.length}. Não tentados: ${unattempted}.</p>${timedOut ? "<p>A sequência foi interrompida para aguardar o servidor. A última gravação ainda pode ser concluída. Aguarde alguns minutos e clique novamente em Completar links; os vínculos já salvos serão conferidos e ignorados.</p>" : ""}${failures.length ? `<ul>${failures.map(message => `<li>${escapeHTML(message)}</li>`).join("")}</ul>` : ""}<div class="agora-actions"><button type="button" data-close>Fechar</button></div>`;
+      document.body.append(overlay);
+    } catch (error) { notify(error.message, true); }
+    finally { button.disabled = false; button.textContent = "Completar links"; }
+  }
+
+  function pendencyCiplexIds(item) {
+    const ids = extractCiplexIds([item.clienteUrl, item.animalUrl].filter(Boolean).join(" "));
+    const originId = String(item.origemRegistro || "").match(/^consulta:(\d+):/);
+    let animalId = String(item.ciplexAnimalId || ids.pacienteId || originId?.[1] || "");
+    let clientId = String(item.ciplexClienteId || item.clienteId || ids.clienteId || ciplexPatientClients.get(animalId) || "");
+    return { animalId, clientId };
+  }
+
+  function pendencyNameLink(name, item, animal) {
+    const { animalId, clientId } = pendencyCiplexIds(item);
+    const clientUrl = /^\d+$/.test(clientId) ? `https://ciplexsistemas.com/sistema/exibir#clientes/exibir/${clientId}` : "";
+    const url = animal ? clientUrl && /^\d+$/.test(animalId) ? `${clientUrl}&Animal.editar=${animalId}` : safeCiplexUrl(item.animalUrl || "") : clientUrl || safeCiplexUrl(item.clienteUrl || "");
+    return consultationName(name, url);
+  }
+
+  function dashboardPendingRow(item) {
+    const statusClass = ["open", "communicated", "regularizing", "resolved", "closed"][STATUSES.indexOf(item.status)] || "open";
+    const date = pendingDate(item);
+    return `<tr class="${isOverdue(item) ? "agora-dashboard-overdue" : ""}">
+      <td>${escapeHTML(date ? formatDate(date) : "—")}</td>
+      <td>${escapeHTML(item.veterinario || "Não informado")}</td>
+      <td>${pendencyNameLink(item.paciente || "Não informado", item, true)}</td>
+      <td>${pendencyNameLink(item.tutor || "Não informado", item, false)}</td>
+      <td><i class="agora-origin ${pendencyOrigin(item) === "Internação" ? "hospital" : "consultation"}">${escapeHTML(pendencyOrigin(item))}</i></td>
+      <td class="agora-dashboard-description">${escapeHTML(item.categoria ? item.categoria + ": " : "")}${escapeHTML(item.descricao)}${isOverdue(item) ? '<small class="agora-dashboard-warning">Vencida</small>' : ""}${item.reincidente === true || item.reincidente === "true" ? '<small class="agora-dashboard-warning recurrent">Reincidente</small>' : ""}</td>
+      <td><button type="button" class="agora-status-button ${statusClass}" data-open-pending="${escapeHTML(item.id)}" aria-label="${escapeHTML("Editar pendência de " + (item.paciente || "paciente") + ": " + item.status)}">${escapeHTML(item.status)}</button></td>
+    </tr>`;
+  }
+
+  function openDashboardPending(event) {
+    const item = dashboardPendencies.find(pending => String(pending.id) === event.currentTarget.dataset.openPending);
+    if (!item) return;
+    const overlay = createOverlay("Atualizar pendência", true);
+    overlay.dataset.dashboardPending = item.id;
+    overlay.querySelector(".agora-modal-body").innerHTML = `<div class="agora-context"><strong>${escapeHTML(item.paciente || "Paciente não informado")} · ${escapeHTML(item.tutor || "Cliente não informado")}</strong><span>${escapeHTML(item.veterinario || "Veterinário não informado")}</span></div>${pendingCard(item)}`;
+    document.body.append(overlay);
+    overlay.querySelector("[data-update-pending]").addEventListener("click", updateDashboardPending);
+    overlay.querySelector("[data-history-pending]").addEventListener("click", showHistory);
   }
 
   function dashboardPendingPayload(card, id) {
@@ -510,6 +734,7 @@
     runBackgroundSave(() => apiRequest("updatePendencia", { pendencia: dashboardPendingPayload(card, button.dataset.updatePending) }, { blocking: false }))
       .then(() => {
         notify("Pendência atualizada.");
+        card.closest(".agora-overlay")?.remove();
         loadDashboardPendencies(true);
       })
       .catch(error => {
@@ -520,10 +745,11 @@
 
   function saveAllDashboardPending(event) {
     const button = event?.currentTarget || document.querySelector("[data-dashboard-save-all]");
-    const cards = [...document.querySelectorAll("#agora-dashboard-root [data-pending-id]")];
-    if (!cards.length) return notify("Não há pendências exibidas para salvar.", true);
+    const items = filteredDashboardPendencies();
+    if (!items.length) return notify("Não há pendências exibidas para salvar.", true);
     if (button?.disabled) return;
-    const payloads = cards.map(card => dashboardPendingPayload(card, card.dataset.pendingId));
+    const editingCard = document.querySelector(".agora-overlay[data-dashboard-pending] [data-pending-id]");
+    const payloads = items.map(item => editingCard?.dataset.pendingId === String(item.id) ? dashboardPendingPayload(editingCard, item.id) : { id: item.id, status: item.status, observacao: "", usuario: "Coordenadora" });
     button.disabled = true;
     runBackgroundSave(async () => {
       for (const pendencia of payloads) {
@@ -568,8 +794,8 @@
       historyButton.disabled = true;
       textarea.value = "Carregando histórico...";
       try {
-        const result = await apiRequest("listHistorico");
-        historyText = dashboardHistoryReportText(items, result.historico);
+        const history = await loadDashboardHistory();
+        historyText = dashboardHistoryReportText(items, history);
         if (reportMode === "history") textarea.value = historyText;
       } catch (error) {
         if (reportMode === "history") {
@@ -617,11 +843,11 @@
   function groupedDashboardReport(items, title, renderPending) {
     const veterinarians = groupBy(items, item => item.veterinario || "Não informado");
     const sections = [...veterinarians.entries()].sort(([first], [second]) => first.localeCompare(second, "pt-BR")).map(([veterinarian, records]) => {
-      const patients = groupBy(records, item => item.ciplexAnimalId || item.pacienteId || `${normalizeText(item.paciente)}|${normalizeText(item.tutor)}`);
+      const patients = groupBy(records, item => `${item.ciplexAnimalId || item.pacienteId || `${normalizeText(item.paciente)}|${normalizeText(item.tutor)}`}|${formatDate(pendingDate(item))}`);
       const patientSections = [...patients.values()].sort((first, second) => String(first[0].paciente || "").localeCompare(String(second[0].paciente || ""), "pt-BR")).map(patientRecords => {
         const patient = patientRecords[0];
         const identifier = patient.ciplexAnimalId || "sem ID Ciplex";
-        const lines = [`- ${patient.paciente || "Paciente não informado"} - ${identifier} - ${patient.tutor || "Tutor não informado"}:`];
+        const lines = [`- ${patient.paciente || "Paciente não informado"} - ${identifier} - ${patient.tutor || "Tutor não informado"} - Abertura: ${pendingDate(patient) ? formatDate(pendingDate(patient)) : "não informada"}:`];
         const origins = groupBy(patientRecords, pendencyOrigin);
         ["Internação", "Consulta"].forEach(origin => {
           const pending = origins.get(origin);
@@ -682,7 +908,7 @@
     const root = document.createElement("section");
     root.id = "agora-consultations-root";
     root.innerHTML = `<main class="agora-consultation-page">
-      <header><div><h1>Avaliação de consultas</h1><p>Completude, suficiência, coerência e documentação integradas às pendências operacionais.</p></div><button type="button" data-consultation-close>Fechar</button></header>
+      <header><div><h1>Avaliação de consultas</h1><p>Completude, suficiência, coerência e documentação integradas às pendências operacionais.</p></div><div class="agora-panel-navigation"><button type="button" data-consultation-dashboard>Painel da coordenação</button><button type="button" data-consultation-close>Fechar</button></div></header>
       <div class="agora-consultation-toolbar">
         <label>Data inicial<input type="date" data-consultation-start value="${today}"></label>
         <label>Data final<input type="date" data-consultation-end value="${today}"></label>
@@ -694,6 +920,7 @@
       <div class="agora-consultation-table"><table><thead><tr><th>Cliente</th><th>Animal</th><th>Data</th><th>Médico Veterinário</th><th>Avaliação</th></tr></thead><tbody></tbody></table></div>
     </main>`;
     document.body.append(root);
+    root.querySelector("[data-consultation-dashboard]").addEventListener("click", () => switchCoordinationPanel(openCoordinationDashboard));
     root.querySelector("[data-consultation-close]").addEventListener("click", () => closeCoordinationPanel(true));
     const fetchButton = root.querySelector("[data-consultation-fetch]");
     fetchButton.addEventListener("click", fetchConsultations);
@@ -722,6 +949,7 @@
       });
       if (/login|entrar no sistema/i.test(text) && !/<table/i.test(text)) throw new Error("A sessão do Ciplex parece ter expirado.");
       consultationRecords = extractConsultations(text);
+      rememberConsultationLinks(consultationRecords);
       renderConsultations();
       notify(`${consultationRecords.length} consulta${consultationRecords.length === 1 ? "" : "s"} carregada${consultationRecords.length === 1 ? "" : "s"}.`);
     } catch (error) {
@@ -780,7 +1008,7 @@
   }
 
   function consultationName(name, url) {
-    return `<div class="agora-consultation-name"><span>${escapeHTML(name)}</span>${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener">Abrir ↗</a>` : ""}</div>`;
+    return `<div class="agora-consultation-name">${url ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener"><span class="agora-link-icon" aria-hidden="true">🔗</span> ${escapeHTML(name)}</a>` : `<span>${escapeHTML(name)}</span>`}</div>`;
   }
 
   function openConsultationReview(event) {
@@ -840,6 +1068,10 @@
             id: existing?.id,
             origemRegistro: originId,
             ciplexAnimalId: record.pacienteId,
+            ciplexClienteId: record.clienteId,
+            clienteId: record.clienteId,
+            clienteUrl: record.clienteUrl,
+            animalUrl: record.animalUrl,
             paciente: record.animal,
             tutor: record.cliente,
             veterinario: record.veterinario,
@@ -927,6 +1159,7 @@
   }
 
   function safeCiplexUrl(value) {
+    if (!value) return "";
     try {
       const url = new URL(value, "https://ciplexsistemas.com");
       return url.origin === "https://ciplexsistemas.com" ? url.href : "";
@@ -954,7 +1187,7 @@
       #agora-dashboard-root{position:fixed;inset:0;z-index:2147483550;overflow:auto;background:#f2f0e9;color:#21352f;font-family:Arial,sans-serif}
       #agora-dashboard-root *{box-sizing:border-box}.agora-dashboard-page{max-width:1450px;margin:auto;padding:24px}.agora-dashboard-page>header{display:flex;justify-content:space-between;gap:20px;margin-bottom:18px}.agora-dashboard-page h1{margin:0;color:#0b4a3f}.agora-dashboard-page p{margin:5px 0;color:#66736f}.agora-dashboard-page button{border:1px solid #9baba5;border-radius:7px;padding:9px 12px;background:#fff;font-weight:700;cursor:pointer}
       .agora-dashboard-filters{display:grid;grid-template-columns:2fr repeat(5,1fr);gap:9px;padding:14px;background:#fff;border:1px solid #d1d9d5;border-radius:9px}.agora-dashboard-filters label{display:grid;gap:5px;font-size:11px;font-weight:700;text-transform:uppercase}.agora-dashboard-filters input,.agora-dashboard-filters select{min-width:0;width:100%;border:1px solid #bac7c2;border-radius:6px;padding:8px;background:#fff}
-      .agora-dashboard-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:12px 0}.agora-dashboard-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:12px}.agora-dashboard-list .agora-pending-card{min-width:0}.agora-report-options{display:flex;gap:8px;margin-bottom:12px}.agora-report-options button{border:1px solid #8fa39c;border-radius:999px;padding:8px 14px;background:#fff;color:#27453d;font-weight:700;cursor:pointer}.agora-report-options button.active{background:#0b594a;color:#fff;border-color:#0b594a}.agora-report-text{width:100%;box-sizing:border-box;border:1px solid #bac7c2;border-radius:7px;padding:12px;background:#fff;color:#20352f;font:13px/1.45 Consolas,monospace;resize:vertical}
+      .agora-dashboard-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:12px 0}.agora-dashboard-list{display:block}.agora-dashboard-list .agora-pending-card{min-width:0}.agora-report-options{display:flex;gap:8px;margin-bottom:12px}.agora-report-options button{border:1px solid #8fa39c;border-radius:999px;padding:8px 14px;background:#fff;color:#27453d;font-weight:700;cursor:pointer}.agora-report-options button.active{background:#0b594a;color:#fff;border-color:#0b594a}.agora-report-text{width:100%;box-sizing:border-box;border:1px solid #bac7c2;border-radius:7px;padding:12px;background:#fff;color:#20352f;font:13px/1.45 Consolas,monospace;resize:vertical}
       @media(max-width:1050px){.agora-dashboard-filters{grid-template-columns:repeat(3,1fr)}.agora-dashboard-filters label:first-child{grid-column:span 3}}
       @media(max-width:650px){.agora-dashboard-filters{grid-template-columns:1fr}.agora-dashboard-filters label:first-child{grid-column:auto}.agora-dashboard-list{grid-template-columns:1fr}.agora-dashboard-page{padding:12px}}
     `;
@@ -964,6 +1197,10 @@
       #agora-loading-overlay i{display:block;width:54px;height:54px;margin:0 auto 18px;border:5px solid #c0f6ff3d;border-top-color:#c0f6ff;border-radius:50%;animation:agora-loading-spin .75s linear infinite}#agora-loading-overlay strong,#agora-loading-overlay small{display:block}#agora-loading-overlay strong{font-size:18px}#agora-loading-overlay small{margin-top:7px;color:#c0f6ff;font-size:12px}
       @keyframes agora-loading-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){#agora-loading-overlay{transition:none}#agora-loading-overlay i{animation-duration:1.5s}}
     `;
+    style.textContent += "\n      .agora-dashboard-table{overflow:auto;border:1px solid #ccd4d1;border-radius:8px;background:#fff}.agora-dashboard-table table{width:100%;min-width:1050px;border-collapse:collapse}.agora-dashboard-table th{padding:10px;background:#0b4a3f;color:#fff;text-align:left}.agora-dashboard-table td{padding:9px;border-bottom:1px solid #dbe1de;vertical-align:top}.agora-dashboard-table th button{border:0;background:transparent;color:inherit;padding:0;text-align:left;font:inherit;font-weight:700;white-space:nowrap}.agora-dashboard-table th button:focus-visible{outline:2px solid #c0f6ff;outline-offset:4px}.agora-dashboard-description{min-width:240px;white-space:pre-wrap;overflow-wrap:anywhere}.agora-dashboard-overdue td{background:#fff7f5}.agora-dashboard-overdue td:first-child{box-shadow:inset 4px 0 #b3392b}.agora-dashboard-warning{display:block;margin-top:4px;color:#9d3028;font-size:11px;font-weight:700}.agora-dashboard-warning.recurrent{color:#795600}.agora-dashboard-table .agora-status-button{border:0;border-radius:999px;padding:6px 10px;font-size:11px;white-space:nowrap}.agora-status-button.open{background:#fff1cf;color:#795600}.agora-status-button.communicated{background:#dbe9f5;color:#245a83}.agora-status-button.regularizing{background:#eee1f5;color:#6b3886}.agora-status-button.resolved{background:#dcefe9;color:#0b4a3f}.agora-status-button.closed{background:#e7e9e8;color:#52615b}\n";
+    style.textContent += ".agora-modal select{height:auto;min-height:40px;line-height:1.4;padding:9px 30px 9px 9px}.agora-panel-navigation{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.agora-dashboard-table .agora-consultation-name a{color:#0b594a;font-weight:700}";
+    style.textContent += "#agora-consultations-root{background:#f2f0e9;color:#21352f}.agora-consultation-page{max-width:1450px}.agora-consultation-page>header{margin-bottom:18px}.agora-consultation-page button{border:1px solid #9baba5;border-radius:7px;padding:9px 12px;background:#fff;color:#21352f;font-weight:700}.agora-consultation-toolbar{gap:9px;padding:14px;margin:12px 0 18px;background:#fff;border:1px solid #d1d9d5;border-radius:9px}.agora-consultation-toolbar label{font-size:11px;text-transform:uppercase}.agora-consultation-toolbar input,.agora-consultation-toolbar select{border-color:#bac7c2}.agora-consultation-page button.agora-primary{background:#0b594a;color:#fff;border-color:#0b594a}@media(max-width:650px){.agora-consultation-page{padding:12px}.agora-consultation-toolbar [data-consultation-veterinarian]{min-width:0;max-width:100%}}";
+    style.textContent += ".agora-consultation-name a,.agora-dashboard-table .agora-consultation-name a{color:#0b594a;font-weight:700;text-decoration:underline;text-underline-offset:2px}.agora-link-icon{font-size:11px}.agora-consultation-name a:hover{color:#052d25;text-decoration-thickness:2px}";
     document.head.append(style);
   }
 })();
