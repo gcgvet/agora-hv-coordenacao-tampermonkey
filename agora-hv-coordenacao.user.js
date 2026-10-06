@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.10-test
+// @version      0.5.11-test
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -32,6 +32,7 @@
   let dashboardPendencies = [];
   const ciplexPatientClients = new Map();
   const ciplexNamesLinks = new Map();
+  const ciplexLookupRequests = new Map();
   let dashboardHistoryCache = null;
   let dashboardHistoryRequest = null;
   let dashboardHistoryGeneration = 0;
@@ -432,7 +433,7 @@
         <label>Veterinário<select data-dashboard-veterinarian><option value="">Todos</option></select></label>
         <label>Destaque<select data-dashboard-highlight><option value="">Todos</option><option value="overdue">Vencidas</option><option value="recurrent">Reincidentes</option></select></label>
       </div>
-      <div class="agora-dashboard-actions"><button type="button" data-dashboard-report>Relatório</button><button type="button" data-dashboard-csv>Exportar CSV</button><button type="button" class="agora-primary" data-dashboard-save-all>Salvar todas</button><button type="button" class="agora-primary" data-dashboard-refresh>Atualizar</button></div>
+      <div class="agora-dashboard-actions"><button type="button" data-dashboard-complete-links>Completar links</button><button type="button" data-dashboard-report>Relatório</button><button type="button" data-dashboard-csv>Exportar CSV</button><button type="button" class="agora-primary" data-dashboard-save-all>Salvar todas</button><button type="button" class="agora-primary" data-dashboard-refresh>Atualizar</button></div>
       <div class="agora-indicators" data-dashboard-indicators></div>
       <div class="agora-dashboard-list" data-dashboard-list><p>Carregando pendências...</p></div>
     </main>`;
@@ -441,6 +442,7 @@
     root.querySelector("[data-dashboard-close]").addEventListener("click", () => closeCoordinationPanel(true));
     root.querySelectorAll(".agora-dashboard-filters input,.agora-dashboard-filters select").forEach(control => control.addEventListener("input", renderDashboard));
     root.querySelector("[data-dashboard-refresh]").addEventListener("click", loadDashboardPendencies);
+    root.querySelector("[data-dashboard-complete-links]").addEventListener("click", completeDashboardLinks);
     root.querySelector("[data-dashboard-report]").addEventListener("click", openDashboardReport);
     root.querySelector("[data-dashboard-csv]").addEventListener("click", () => exportOperationalData("csv"));
     root.querySelector("[data-dashboard-save-all]").addEventListener("click", saveAllDashboardPending);
@@ -578,25 +580,88 @@
     });
   }
 
-  async function hydrateDashboardLinks() {
-    const missing = dashboardPendencies.filter(item => {
-      const ids = pendencyCiplexIds(item);
-      return !ids.animalId || !ids.clientId;
+  function clientIdFromSearch(html, animalId) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const candidates = new Set();
+    const exact = new Set();
+    doc.querySelectorAll("a[href]").forEach(link => {
+      const url = safeCiplexUrl(link.getAttribute("href"));
+      if (!url) return;
+      const ids = extractCiplexIds(url);
+      if (!ids.clienteId) return;
+      if (ids.pacienteId && ids.pacienteId !== String(animalId)) return;
+      candidates.add(ids.clienteId);
+      if (ids.pacienteId === String(animalId)) exact.add(ids.clienteId);
     });
-    if (!missing.length || location.origin !== "https://ciplexsistemas.com") return;
-    const dates = missing.map(pendingDate).map(value => String(value).slice(0, 10)).filter(value => /^\d{4}-\d{2}-\d{2}$/.test(value) && value <= todayISO()).sort();
-    // Older records without an opening date are searched in the last 90 days.
-    const fallback = new Date();
-    fallback.setDate(fallback.getDate() - 90);
-    const fallbackISO = `${fallback.getFullYear()}-${String(fallback.getMonth() + 1).padStart(2, "0")}-${String(fallback.getDate()).padStart(2, "0")}`;
-    const originDates = missing.map(item => String(item.origemRegistro || "").match(/:(\d{2})\/(\d{2})\/(\d{4})/)).filter(Boolean).map(match => `${match[3]}-${match[2]}-${match[1]}`);
-    const start = [...dates, ...originDates, fallbackISO].sort()[0];
-    const period = `${isoToBrazilian(start)} - ${isoToBrazilian(todayISO())}`;
-    const endpoint = `/sistema/relatorios_atendimento/exibir_atendimentos_realizados?${new URLSearchParams({ "data[periodo]": period })}`;
-    const response = await fetch(endpoint, { credentials: "include", headers: { "X-Requested-With": "XMLHttpRequest" } });
-    if (!response.ok) throw new Error(`O Ciplex respondeu com o código ${response.status}.`);
-    rememberConsultationLinks(extractConsultations(await response.text()));
-    renderDashboard();
+    if (exact.size === 1) return [...exact][0];
+    if (!exact.size && candidates.size === 1) return [...candidates][0];
+    throw new Error(candidates.size ? "A busca retornou mais de um cliente possível." : "Nenhum link de cliente encontrado na resposta do Ciplex.");
+  }
+
+  function lookupCiplexClient(animalId) {
+    animalId = String(animalId);
+    if (!/^\d+$/.test(animalId)) return Promise.reject(new Error("ID do animal inválido."));
+    if (ciplexPatientClients.has(animalId)) return Promise.resolve(ciplexPatientClients.get(animalId));
+    if (ciplexLookupRequests.has(animalId)) return ciplexLookupRequests.get(animalId);
+    const request = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20000);
+      try {
+        const query = new URLSearchParams({ pagina: "1", pesquisa: animalId, campo: "idAnimal" });
+        const response = await fetch("/sistema/clientes/listar?" + query, { credentials: "include", headers: { "X-Requested-With": "XMLHttpRequest" }, signal: controller.signal });
+        if (!response.ok) throw new Error("Falha na busca Ciplex: " + response.status);
+        const clientId = clientIdFromSearch(await response.text(), animalId);
+        ciplexPatientClients.set(animalId, clientId);
+        return clientId;
+      } finally { clearTimeout(timeout); }
+    })().finally(() => ciplexLookupRequests.delete(animalId));
+    ciplexLookupRequests.set(animalId, request);
+    return request;
+  }
+
+  async function hydrateDashboardLinks() {
+    if (location.origin !== "https://ciplexsistemas.com") return;
+    const animals = [...new Set(dashboardPendencies.map(pendencyCiplexIds).filter(ids => ids.animalId && !ids.clientId).map(ids => ids.animalId))];
+    for (const animalId of animals) {
+      if (!document.querySelector("#agora-dashboard-root")) break;
+      try { await lookupCiplexClient(animalId); } catch { continue; }
+      renderDashboard();
+    }
+  }
+
+  async function completeDashboardLinks(event) {
+    const button = event.currentTarget;
+    if (button.disabled) return;
+    if (location.origin !== "https://ciplexsistemas.com") return notify("Abra o painel dentro do Ciplex para completar os links.", true);
+    button.disabled = true;
+    const items = dashboardPendencies.filter(item => !item.ciplexClienteId);
+    let saved = 0;
+    const failures = [];
+    try {
+      await runBackgroundSave(async () => {
+        const health = await apiRequest("health", {}, { blocking: false });
+        if (!health.clientLinks) throw new Error("Atualize primeiro a implantação do Apps Script com suporte ao ID do cliente.");
+        for (const item of items) {
+          button.textContent = `Completando ${saved + failures.length + 1}/${items.length}...`;
+          try {
+            const { animalId } = pendencyCiplexIds(item);
+            if (!animalId) throw new Error("ID do animal ausente.");
+            const clientId = await lookupCiplexClient(animalId);
+            const result = await apiRequest("linkPendenciaCliente", { pendencia: { id: item.id, ciplexAnimalId: animalId, ciplexClienteId: clientId, usuario: "Coordenadora" } }, { blocking: false });
+            if (String(result.pendencia?.ciplexClienteId || "") !== clientId) throw new Error("O serviço não confirmou a gravação.");
+            item.ciplexClienteId = clientId;
+            saved += 1;
+          } catch (error) { failures.push(`${item.codigo || item.paciente || item.id}: ${error.message}`); }
+        }
+      });
+      renderDashboard();
+      invalidateDashboardHistory();
+      loadDashboardHistory().catch(() => {});
+      const overlay = createOverlay("Resultado — completar links", true);
+      overlay.querySelector(".agora-modal-body").innerHTML = `<p>Vínculos salvos: ${saved}. Não atualizados: ${failures.length}.</p>${failures.length ? `<ul>${failures.map(message => `<li>${escapeHTML(message)}</li>`).join("")}</ul>` : ""}<div class="agora-actions"><button type="button" data-close>Fechar</button></div>`;
+      document.body.append(overlay);
+    } catch (error) { notify(error.message, true); }
+    finally { button.disabled = false; button.textContent = "Completar links"; }
   }
 
   function pendencyCiplexIds(item) {
@@ -604,14 +669,6 @@
     const originId = String(item.origemRegistro || "").match(/^consulta:(\d+):/);
     let animalId = String(item.ciplexAnimalId || ids.pacienteId || originId?.[1] || "");
     let clientId = String(item.ciplexClienteId || item.clienteId || ids.clienteId || ciplexPatientClients.get(animalId) || "");
-    const matches = ciplexNamesLinks.get(`${normalizeText(item.paciente)}|${normalizeText(item.tutor)}`);
-    if (matches?.size === 1) {
-      const match = [...matches.values()][0];
-      if (!animalId || animalId === match.animalId) {
-        animalId ||= match.animalId;
-        clientId ||= match.clientId;
-      }
-    }
     return { animalId, clientId };
   }
 
