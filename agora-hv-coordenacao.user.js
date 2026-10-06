@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora HV - Coordenação
 // @namespace    https://agoraveterinaria.com.br/
-// @version      0.5.11-test
+// @version      0.5.12-test
 // @description  Revisão, pendências e painel da coordenação veterinária.
 // @author       Ágora Clínica Veterinária
 // @match        https://ciplexsistemas.com/sistema/*
@@ -250,7 +250,7 @@
         url: WEB_APP_URL,
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         data: JSON.stringify({ action, ...payload }),
-        timeout: 20000,
+        timeout: options.timeout || 20000,
         onload(response) {
           let result;
           try {
@@ -262,7 +262,7 @@
           if (response.status < 200 || response.status >= 300 || !result.ok) reject(new Error(result.error || "Não foi possível concluir a operação."));
           else resolve(result);
         },
-        ontimeout() { reject(new Error("O Apps Script não respondeu a tempo.")); },
+        ontimeout() { const error = new Error("O Apps Script não respondeu a tempo."); error.code = "TIMEOUT"; reject(error); },
         onerror() { reject(new Error("Não foi possível acessar o Apps Script.")); }
       });
     });
@@ -634,31 +634,44 @@
     if (button.disabled) return;
     if (location.origin !== "https://ciplexsistemas.com") return notify("Abra o painel dentro do Ciplex para completar os links.", true);
     button.disabled = true;
-    const items = dashboardPendencies.filter(item => !item.ciplexClienteId);
+    let items = [];
+    let unattempted = 0;
+    let timedOut = false;
     let saved = 0;
     const failures = [];
     try {
       await runBackgroundSave(async () => {
         const health = await apiRequest("health", {}, { blocking: false });
         if (!health.clientLinks) throw new Error("Atualize primeiro a implantação do Apps Script com suporte ao ID do cliente.");
+        button.textContent = "Conferindo vínculos salvos...";
+        const current = await apiRequest("listPendencias", {}, { blocking: false, timeout: 120000 });
+        dashboardPendencies = current.pendencias;
+        items = dashboardPendencies.filter(item => !item.ciplexClienteId);
         for (const item of items) {
           button.textContent = `Completando ${saved + failures.length + 1}/${items.length}...`;
           try {
             const { animalId } = pendencyCiplexIds(item);
             if (!animalId) throw new Error("ID do animal ausente.");
             const clientId = await lookupCiplexClient(animalId);
-            const result = await apiRequest("linkPendenciaCliente", { pendencia: { id: item.id, ciplexAnimalId: animalId, ciplexClienteId: clientId, usuario: "Coordenadora" } }, { blocking: false });
+            const result = await apiRequest("linkPendenciaCliente", { pendencia: { id: item.id, ciplexAnimalId: animalId, ciplexClienteId: clientId, usuario: "Coordenadora" } }, { blocking: false, timeout: 120000 });
             if (String(result.pendencia?.ciplexClienteId || "") !== clientId) throw new Error("O serviço não confirmou a gravação.");
             item.ciplexClienteId = clientId;
             saved += 1;
-          } catch (error) { failures.push(`${item.codigo || item.paciente || item.id}: ${error.message}`); }
+          } catch (error) {
+            failures.push(`${item.codigo || item.paciente || item.id}: ${error.message}`);
+            if (error.code === "TIMEOUT") {
+              timedOut = true;
+              unattempted = items.length - saved - failures.length;
+              break;
+            }
+          }
         }
       });
       renderDashboard();
       invalidateDashboardHistory();
-      loadDashboardHistory().catch(() => {});
+      if (!timedOut) loadDashboardHistory().catch(() => {});
       const overlay = createOverlay("Resultado — completar links", true);
-      overlay.querySelector(".agora-modal-body").innerHTML = `<p>Vínculos salvos: ${saved}. Não atualizados: ${failures.length}.</p>${failures.length ? `<ul>${failures.map(message => `<li>${escapeHTML(message)}</li>`).join("")}</ul>` : ""}<div class="agora-actions"><button type="button" data-close>Fechar</button></div>`;
+      overlay.querySelector(".agora-modal-body").innerHTML = `<p>Gravações confirmadas nesta execução: ${saved}. Sem confirmação ou com erro: ${failures.length}. Não tentados: ${unattempted}.</p>${timedOut ? "<p>A sequência foi interrompida para aguardar o servidor. A última gravação ainda pode ser concluída. Aguarde alguns minutos e clique novamente em Completar links; os vínculos já salvos serão conferidos e ignorados.</p>" : ""}${failures.length ? `<ul>${failures.map(message => `<li>${escapeHTML(message)}</li>`).join("")}</ul>` : ""}<div class="agora-actions"><button type="button" data-close>Fechar</button></div>`;
       document.body.append(overlay);
     } catch (error) { notify(error.message, true); }
     finally { button.disabled = false; button.textContent = "Completar links"; }
